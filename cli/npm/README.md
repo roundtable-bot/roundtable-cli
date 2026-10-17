@@ -6,7 +6,7 @@ Install the npm tarball from the public GitHub release. No npm registry account 
 binary; it does not build Rust or start background services. Node 20+ is required for npm.
 
 ```sh
-roundtable_package="https://github.com/roundtable-bot/roundtable-cli/releases/download/v0.2.9/roundtable-cli-0.2.9.tgz"
+roundtable_package="https://github.com/roundtable-bot/roundtable-cli/releases/download/v0.2.10/roundtable-cli-0.2.10.tgz"
 npm install -g --allow-remote=root --allow-scripts="$roundtable_package" "$roundtable_package"
 roundtable login
 roundtable setup
@@ -41,6 +41,13 @@ Existing Codex sessions on a shared app-server are discoverable and controllable
 Codex and existing Claude terminal sessions are observed; Roundtable never opens a second writer
 against a live Claude conversation. Use `sessions start claude` for remotely promptable Claude.
 Provider CLIs must already be installed and signed in. Their credentials stay on the machine.
+T3 Code desktop sessions are also discovered from the running same-user host's open
+local database. Active runs use the original Codex/Claude session ID, so they remain
+visible after a shared provider closes the transcript file without creating duplicates.
+This fallback is observation-only (`source: hook`): queued/waiting work is `waiting`,
+and running work with no direct provider activity evidence is `unknown`, with a T3
+status note. Both appear in Active Sessions. It expires when T3 closes, the run ends,
+or the thread is archived/deleted. It never resumes, interrupts, or writes to T3.
 Local prompts require an idle session. Remote queued guidance waits for the next idle turn and
 expires after 60 seconds. After an uncertain delivery, inspect the provider before resolving
 the command as `delivered` or `not-delivered`; resolution never sends the prompt again.
@@ -76,6 +83,12 @@ Server activity history retains up to seven days and about 20,000 events per mac
 Interrupting managed Claude currently ends its process; start another session to continue.
 Claude input totals include uncached and cached tokens; cached input is a subset of input.
 The dashboard shows stale/offline data explicitly and excludes it from current session counts.
+Every sync reports the running native daemon's version, which can differ from the npm
+launcher if the service has not been reinstalled. The server retains that version with
+the machine's last-seen time. Machine-wide monitors receive `cli_version`,
+`latest_cli_version`, and `cli_update_available` in machine inventory; unknown versions
+have a null update flag. The Machines view shows the version and links outdated clients
+to upgrade instructions. Offline machines retain their last reported version.
 
 macOS arm64/x64 and Linux glibc arm64/x64 packages are built by the release workflow. Linux x64
 requires glibc 2.35+, Linux arm64 requires 2.39+. Musl/Alpine is not packaged. To build from source:

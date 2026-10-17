@@ -385,6 +385,7 @@ pub fn run(root: PathBuf, config: PathBuf, server: Url) -> Result<()> {
         if scanned.elapsed() >= Duration::from_secs(5) {
             let (count, ok) = discovery::scan(&state, &mut system)?;
             providers.inventory(&state)?;
+            crate::t3::scan(&state, &system)?;
             state.set("process_count", &count.to_string())?;
             state.set("scan_ok", if ok { "true" } else { "false" })?;
             // A failed scan never marks missing sessions as exited remotely.

@@ -4,6 +4,7 @@ mod discovery;
 mod providers;
 mod service;
 mod state;
+mod t3;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
