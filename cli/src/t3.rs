@@ -340,6 +340,8 @@ mod tests {
         terminal.live = true;
         terminal.state = "working".into();
         state.save_session(&terminal)?;
+        // Compare persisted state; JSON can round a fractional timestamp on storage.
+        let terminal = state.session(&terminal.id)?;
         reconcile(&state, std::slice::from_ref(&path))?;
         db.execute("DROP TABLE orchestration_v2_projection_runs", [])?;
         reconcile(&state, &[path])?;
