@@ -87,31 +87,10 @@ pub fn processes(system: &mut System) -> Vec<Process> {
         {
             continue;
         }
-        let mut files = HashSet::new();
-        #[cfg(target_os = "linux")]
-        if let Ok(entries) = fs::read_dir(format!("/proc/{pid}/fd")) {
-            for entry in entries.flatten().take(4096) {
-                if let Ok(path) = fs::read_link(entry.path())
-                    && path.extension().is_some_and(|e| e == "jsonl")
-                {
-                    files.insert(path);
-                }
-            }
-        }
-        #[cfg(target_os = "macos")]
-        if let Ok(output) = crate::providers::bounded_output(
-            std::process::Command::new("lsof").args(["-a", "-p", &pid.to_string(), "-Fn"]),
-            5,
-        ) {
-            for line in String::from_utf8_lossy(&output).lines() {
-                if let Some(path) = line.strip_prefix('n') {
-                    let path = PathBuf::from(path);
-                    if path.extension().is_some_and(|e| e == "jsonl") {
-                        files.insert(path);
-                    }
-                }
-            }
-        }
+        let files = open_files(pid.as_u32())
+            .into_iter()
+            .filter(|path| path.extension().is_some_and(|e| e == "jsonl"))
+            .collect();
         result.push(Process {
             pid: pid.as_u32(),
             start: p.start_time(),
@@ -120,6 +99,33 @@ pub fn processes(system: &mut System) -> Vec<Process> {
         });
     }
     result
+}
+
+pub fn open_files(pid: u32) -> HashSet<PathBuf> {
+    let mut files = HashSet::new();
+    #[cfg(target_os = "linux")]
+    if let Ok(entries) = fs::read_dir(format!("/proc/{pid}/fd")) {
+        for entry in entries.flatten().take(4096) {
+            if let Ok(path) = fs::read_link(entry.path()) {
+                files.insert(path);
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    if let Ok(output) = crate::providers::bounded_output(
+        std::process::Command::new("lsof").args(["-a", "-p", &pid.to_string(), "-Fn"]),
+        5,
+    ) {
+        for line in String::from_utf8_lossy(&output).lines() {
+            if let Some(path) = line.strip_prefix('n') {
+                let path = PathBuf::from(path);
+                if path.is_absolute() {
+                    files.insert(path);
+                }
+            }
+        }
+    }
+    files
 }
 
 pub fn text_content(value: &Value) -> String {

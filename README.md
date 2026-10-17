@@ -10,7 +10,7 @@ Install the npm tarball from the public GitHub release. No npm registry account 
 binary; it does not build Rust or start background services. Node 20+ is required for npm.
 
 ```sh
-roundtable_package="https://github.com/roundtable-bot/roundtable-cli/releases/download/v0.2.9/roundtable-cli-0.2.9.tgz"
+roundtable_package="https://github.com/roundtable-bot/roundtable-cli/releases/download/v0.2.10/roundtable-cli-0.2.10.tgz"
 npm install -g --allow-remote=root --allow-scripts="$roundtable_package" "$roundtable_package"
 roundtable login
 roundtable setup
@@ -45,6 +45,15 @@ Existing Codex sessions on a shared app-server are discoverable and controllable
 Codex and existing Claude terminal sessions are observed; Roundtable never opens a second writer
 against a live Claude conversation. Use `sessions start claude` for remotely promptable Claude.
 Provider CLIs must already be installed and signed in. Their credentials stay on the machine.
+
+T3 Code desktop sessions are also discovered from the running same-user host's open
+local database. Active runs use the original Codex/Claude session ID, so they remain
+visible after a shared provider closes the transcript file without creating duplicates.
+This fallback is observation-only (`source: hook`): queued/waiting work is `waiting`,
+and running work with no direct provider activity evidence is `unknown`, with a T3
+status note. Both appear in Active Sessions. It expires when T3 closes, the run ends,
+or the thread is archived/deleted. It never resumes, interrupts, or writes to T3.
+
 Local prompts require an idle session. Remote queued guidance waits for the next idle turn and
 expires after 60 seconds. After an uncertain delivery, inspect the provider before resolving
 the command as `delivered` or `not-delivered`; resolution never sends the prompt again.

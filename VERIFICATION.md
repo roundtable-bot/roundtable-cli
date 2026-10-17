@@ -1,5 +1,22 @@
 # Release verification
 
+## T3 active-session fix (v0.2.10)
+
+The patched collector was verified on macOS ARM64 on October 17, 2026, using
+macOS Keychain credentials and an existing T3 Code session. The server acknowledged
+a fresh inventory containing the native Codex session as live and observation-only,
+satisfying the Active Sessions filter. A stale historical queue remained excluded.
+The signed-in production UI was unavailable for direct visual confirmation.
+
+The fallback reads only a database held by a running same-user T3 process and
+expires when the host or run closes. Tests cover canonical session IDs, duplicate
+suppression, lifecycle expiry, stale run ordinals, unsupported schemas, unsafe
+permissions, and precedence of direct provider evidence. Host-reported running
+work with unconfirmed provider activity is `unknown`, not verified generation.
+The existing four-platform workflow gates publication on native and installer tests.
+
+## Earlier end-to-end acceptance
+
 Verified October 11, 2026 (UTC), against the live Roundtable account and website.
 The final installed package is **0.2.7**. Provider versions were Codex 0.162.1 and
 Claude Code 2.1.296. Live hosts were macOS ARM64 and Ubuntu Linux x64.
