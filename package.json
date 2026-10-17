@@ -1,6 +1,6 @@
 {
   "name": "@roundtable/cli",
-  "version": "0.2.10",
+  "version": "0.2.11",
   "description": "Native machine monitoring and coding-session control for Roundtable",
   "license": "UNLICENSED",
   "repository": {
