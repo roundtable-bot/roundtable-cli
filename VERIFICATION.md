@@ -1,6 +1,6 @@
 # Release verification
 
-## T3 active-session fix (v0.2.10)
+## T3 active-session fix (v0.2.11)
 
 The patched collector was verified on macOS ARM64 on October 17, 2026, using
 macOS Keychain credentials and an existing T3 Code session. The server acknowledged
