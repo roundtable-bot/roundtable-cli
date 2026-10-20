@@ -83,6 +83,9 @@ pub struct Policy {
     pub content_roots: Vec<PathBuf>,
     /// Remote prompts are disabled until explicitly enabled on the machine.
     pub remote_control: bool,
+    /// The service installs verified releases unless updates were made manual.
+    #[serde(default)]
+    pub manual_updates: bool,
 }
 
 impl Policy {
@@ -337,7 +340,7 @@ mod tests {
         fs::create_dir(&outside)?;
         let policy = Policy {
             content_roots: vec![allowed.clone()],
-            remote_control: false,
+            ..Policy::default()
         };
         assert!(policy.content(allowed.join("removed/project").to_str().unwrap()));
         assert!(!policy.content(outside.join("removed/project").to_str().unwrap()));

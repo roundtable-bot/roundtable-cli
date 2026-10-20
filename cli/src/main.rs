@@ -5,6 +5,7 @@ mod providers;
 mod service;
 mod state;
 mod t3;
+mod update;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -66,6 +67,9 @@ enum Commands {
         allow_control: bool,
         #[arg(long)]
         deny_control: bool,
+        /// Install verified releases automatically (`auto`, the default) or only by hand (`manual`)
+        #[arg(long, value_parser = ["auto", "manual"])]
+        updates: Option<String>,
     },
     /// Discover sessions, read activity, and prompt managed or attachable providers
     Sessions {
@@ -172,6 +176,7 @@ fn configure(
     metadata_only: bool,
     allow: bool,
     deny: bool,
+    updates: Option<String>,
 ) -> Result<()> {
     let tx = state.db.unchecked_transaction()?;
     let mut policy = state.policy()?;
@@ -192,6 +197,9 @@ fn configure(
     }
     if deny {
         policy.remote_control = false;
+    }
+    if let Some(updates) = updates {
+        policy.manual_updates = updates == "manual";
     }
     state.set("policy", &serde_json::to_string(&policy)?)?;
     state.scrub_content()?;
@@ -527,6 +535,7 @@ fn run() -> Result<()> {
                 false,
                 allow_control,
                 false,
+                None,
             )?;
             service::manage("install", &agent_root, &root, &cli.server)?;
             return service::manage("start", &agent_root, &root, &cli.server);
@@ -536,6 +545,7 @@ fn run() -> Result<()> {
             metadata_only,
             allow_control,
             deny_control,
+            updates,
         } => {
             return configure(
                 &state::State::open(agent_root)?,
@@ -543,6 +553,7 @@ fn run() -> Result<()> {
                 metadata_only,
                 allow_control,
                 deny_control,
+                updates,
             );
         }
         Commands::Sessions { command } => return session_command(&agent_root, command),

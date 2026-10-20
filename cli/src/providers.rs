@@ -504,6 +504,7 @@ impl Providers {
                         let Ok(value) = process.output.try_recv() else {
                             break;
                         };
+                        claude_completion(state, &session, &value)?;
                         crate::discovery::parse(state, &mut session, &value)?;
                         if value["type"] == "result" {
                             session.state = "idle".into();
@@ -519,6 +520,30 @@ impl Providers {
                 }
             }
             if session != previous || now() - session.observed_at >= 1. {
+                session.observed_at = now();
+                state.save_session(&session)?;
+            }
+        }
+        // Existing app-server sessions may publish live turn events through the proxy.
+        // History polling itself never manufactures a completion signal.
+        if let Some(proxy) = self.proxy.as_mut() {
+            for value in proxy.drain() {
+                if !matches!(
+                    value["method"].as_str(),
+                    Some("turn/started" | "turn/completed")
+                ) {
+                    continue;
+                }
+                let Some(thread) = value["params"]["threadId"].as_str() else {
+                    continue;
+                };
+                let Ok(mut session) = state.session(&format!("codex:{thread}")) else {
+                    continue;
+                };
+                if session.source != "app-server" {
+                    continue;
+                }
+                codex_event(state, &mut session, &value, &mut HashSet::new())?;
                 session.observed_at = now();
                 state.save_session(&session)?;
             }
@@ -730,6 +755,21 @@ fn visible_event(
     Ok(())
 }
 
+fn claude_completion(state: &State, session: &Session, value: &Value) -> Result<()> {
+    // Only live provider results; transcript discovery must never call this helper.
+    if value["type"] == "result"
+        && value["is_error"] == false
+        && value["subtype"] == "success"
+        && let Some(turn) = value["uuid"].as_str().or(session.turn_id.as_deref())
+    {
+        state.event(
+            json!({"kind":"status","session_id":session.id,"session":session,
+            "completed_turn_id":turn,"text":"Turn completed"}),
+        )?;
+    }
+    Ok(())
+}
+
 fn codex_event(
     state: &State,
     session: &mut Session,
@@ -787,6 +827,12 @@ fn codex_event(
         }
         "turn/completed" => {
             streamed.clear();
+            if p["turn"]["status"] == "completed" && p["turn"]["id"].as_str().is_some() {
+                state.event(
+                    json!({"kind":"status","session_id":session.id,"session":session,
+                    "completed_turn_id":p["turn"]["id"],"text":"Turn completed"}),
+                )?;
+            }
             session.state = "idle".into();
             session.turn_id = None;
             state.event(json!({"kind":"status","session_id":session.id,"text":format!("Turn {}",p["turn"]["status"].as_str().unwrap_or("unknown"))}))?;
@@ -872,6 +918,59 @@ mod tests {
         assert_eq!(rpc.drain()[0]["method"], "turn/started");
         done.send(())?;
         server.join().unwrap();
+        Ok(())
+    }
+    #[test]
+    fn only_successful_live_results_emit_completion_metadata() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let state = State::open(tmp.path().join("state"))?;
+        let mut codex = Session::new("codex", "one", "/work/private-project", "managed");
+        codex.live = true;
+        let mut streamed = HashSet::new();
+        for status in ["failed", "interrupted", "completed"] {
+            codex_event(
+                &state,
+                &mut codex,
+                &json!({"method":"turn/completed",
+                "params":{"threadId":"one","turn":{"id":status,"status":status}}}),
+                &mut streamed,
+            )?;
+        }
+        codex_event(
+            &state,
+            &mut codex,
+            &json!({"method":"turn/completed",
+            "params":{"threadId":"someone-else","turn":{"id":"wrong","status":"completed"}}}),
+            &mut streamed,
+        )?;
+        let events = state.events(&codex.id, 0)?;
+        let completions: Vec<_> = events["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e.get("completed_turn_id").is_some())
+            .collect();
+        assert_eq!(completions.len(), 1);
+        assert_eq!(completions[0]["completed_turn_id"], "completed");
+
+        let mut claude = Session::new("claude", "two", "/work/private-project", "managed");
+        claude.live = true;
+        for (subtype, error) in [
+            ("success", true),
+            ("error_max_turns", false),
+            ("success", false),
+        ] {
+            claude_completion(
+                &state,
+                &claude,
+                &json!({"type":"result", "subtype":subtype,
+                "is_error":error,"uuid":"result-one","result":"private answer"}),
+            )?;
+        }
+        let events = state.events(&claude.id, 0)?;
+        assert_eq!(events["events"].as_array().unwrap().len(), 1);
+        assert_eq!(events["events"][0]["completed_turn_id"], "result-one");
+        assert!(!events.to_string().contains("private answer"));
         Ok(())
     }
 
