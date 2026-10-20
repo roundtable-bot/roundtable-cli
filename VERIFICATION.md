@@ -1,5 +1,17 @@
 # Release verification
 
+## Automatic updates and empty Claude sessions (v0.2.12)
+
+Verified on macOS ARM64 on October 19, 2026. A source build labelled 0.2.10 ran its
+service against a local sync server that announced the published v0.2.11 release and its
+SHA256SUMS digest. The service downloaded the GitHub asset, verified the digest and
+`--version`, replaced its binary, and restarted under the same process ID. It then synced
+as 0.2.11 and answered on its local socket. Tests cover offer rules (no downgrades),
+digest and version rejection, abandoned-download cleanup, and rollback to the previous
+binary when an update never syncs. `claude agents` rows without a transcript (for example
+`claude -p --no-session-persistence`) are no longer recorded as sessions. This release
+also emits completion events for Roundtable notifications.
+
 ## T3 active-session fix (v0.2.11)
 
 The patched collector was verified on macOS ARM64 on October 17, 2026, using

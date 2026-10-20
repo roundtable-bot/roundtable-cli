@@ -10,7 +10,7 @@ Install the npm tarball from the public GitHub release. No npm registry account 
 binary; it does not build Rust or start background services. Node 20+ is required for npm.
 
 ```sh
-roundtable_package="https://github.com/roundtable-bot/roundtable-cli/releases/download/v0.2.11/roundtable-cli-0.2.11.tgz"
+roundtable_package="https://github.com/roundtable-bot/roundtable-cli/releases/download/v0.2.12/roundtable-cli-0.2.12.tgz"
 npm install -g --allow-remote=root --allow-scripts="$roundtable_package" "$roundtable_package"
 roundtable login
 roundtable setup
@@ -23,6 +23,12 @@ at user login. Enable visible prompt/response collection for selected projects a
 ```sh
 roundtable monitor --content /absolute/project/path --allow-control
 ```
+
+The service updates itself. Roundtable names the latest release and the SHA-256 of each
+platform's binary; the service downloads that binary from the GitHub release, checks the digest
+and version, and restarts in place once no Roundtable-managed session is running. It never
+installs an older version. Use `roundtable monitor --updates manual` to update only by hand,
+and `--updates auto` to turn automatic updates back on.
 
 Grant each assistant access from the Coding sessions page. Monitor, conversation read, prompting
 and interruption are separate permissions. Grants expire after 24 hours in the UI. Machine-wide

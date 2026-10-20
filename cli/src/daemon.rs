@@ -17,7 +17,7 @@ use std::os::unix::{
 };
 use std::path::{Path, PathBuf};
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, Instant};
@@ -87,10 +87,12 @@ fn sync_once(state: &State, config: &Path, server: &Url, client: &Client) -> Res
     if state.get("device_id")?.as_deref() != Some(&credential.device_id) {
         let tx = state.db.unchecked_transaction()?;
         if state.get("device_id")?.is_some() {
-            state.set(
-                "policy",
-                &serde_json::to_string(&crate::state::Policy::default())?,
-            )?;
+            // A new login resets sharing, but keeps the machine's update preference.
+            let policy = crate::state::Policy {
+                manual_updates: state.policy()?.manual_updates,
+                ..Default::default()
+            };
+            state.set("policy", &serde_json::to_string(&policy)?)?;
             state.scrub_content()?;
             let max: i64 =
                 state
@@ -135,6 +137,9 @@ fn sync_once(state: &State, config: &Path, server: &Url, client: &Client) -> Res
     state.set("last_ack", &ack.to_string())?;
     state.set("connection", "online")?;
     state.set("last_sync", &now().to_string())?;
+    if data["cli_release"].is_object() {
+        state.set("cli_release", &data["cli_release"].to_string())?;
+    }
     for command in data["uncertain"].as_array().into_iter().flatten() {
         if let Some(id) = command["id"].as_str().filter(|s| discovery::valid_id(s)) {
             state.db.execute(
@@ -231,6 +236,38 @@ fn local_control(state: &State, providers: &mut Providers, request: &Value) -> R
     Ok(json!({"status":"delivered"}))
 }
 
+/// Stage the server-announced release, retrying a failed one at most every six hours.
+fn prepare_update(state: &State, client: &Client, exe: &Path) -> Result<Option<PathBuf>> {
+    if state.policy()?.manual_updates {
+        return Ok(None);
+    }
+    let release =
+        serde_json::from_str(&state.get("cli_release")?.unwrap_or_default()).unwrap_or(Value::Null);
+    let Some((next, digest)) = crate::update::offered(&release, env!("CARGO_PKG_VERSION")) else {
+        return Ok(None);
+    };
+    let attempt = format!("{next}:{digest}");
+    let last = state
+        .get("update_attempt_at")?
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.);
+    if state.get("update_attempt")?.as_deref() == Some(&attempt) && now() - last < 21600. {
+        return Ok(None);
+    }
+    state.set("update_attempt", &attempt)?;
+    state.set("update_attempt_at", &now().to_string())?;
+    match crate::update::stage(client, crate::update::RELEASES, &next, &digest, exe) {
+        Ok(path) => {
+            eprintln!("Roundtable {next} verified; installing once no managed sessions run.");
+            Ok(Some(path))
+        }
+        Err(error) => {
+            eprintln!("Roundtable {next} update failed: {error}");
+            Ok(None)
+        }
+    }
+}
+
 fn handle(state: &State, providers: &mut Providers, value: Value) -> Result<Value> {
     match value["op"].as_str().unwrap_or("") {
         "status" => Ok(
@@ -310,6 +347,8 @@ fn handle(state: &State, providers: &mut Providers, value: Value) -> Result<Valu
 
 pub fn run(root: PathBuf, config: PathBuf, server: Url) -> Result<()> {
     private_dir(&root)?;
+    let exe = fs::canonicalize(std::env::current_exe()?)?;
+    crate::update::startup(&exe)?;
     let lock = OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -348,9 +387,13 @@ pub fn run(root: PathBuf, config: PathBuf, server: Url) -> Result<()> {
     ctrlc::set_handler(move || stop.store(false, Ordering::SeqCst))?;
     let sync_running = running.clone();
     let sync_root = root.clone();
+    let staged: Arc<Mutex<Option<PathBuf>>> = Arc::default();
+    let sync_staged = staged.clone();
+    let sync_exe = exe.clone();
     let worker = std::thread::spawn(move || -> Result<()> {
         let state = State::open(sync_root)?;
         let client = client()?;
+        let downloads = crate::update::client()?;
         let mut failures = 0;
         while sync_running.load(Ordering::SeqCst) {
             if let Err(error) = sync_once(&state, &config, &server, &client) {
@@ -358,6 +401,12 @@ pub fn run(root: PathBuf, config: PathBuf, server: Url) -> Result<()> {
                 state.set("connection", &format!("offline; retrying: {error}"))?;
             } else {
                 failures = 0;
+                crate::update::confirmed(&sync_exe);
+                if sync_staged.lock().unwrap().is_none()
+                    && let Ok(Some(path)) = prepare_update(&state, &downloads, &sync_exe)
+                {
+                    *sync_staged.lock().unwrap() = Some(path);
+                }
             }
             let delay = if failures == 0 {
                 if state.batch()?.is_empty() { 20 } else { 1 }
@@ -376,6 +425,7 @@ pub fn run(root: PathBuf, config: PathBuf, server: Url) -> Result<()> {
     let mut providers = Providers::new();
     let mut system = sysinfo::System::new();
     let mut scanned = Instant::now() - Duration::from_secs(10);
+    let mut updating = false;
     eprintln!(
         "Roundtable service running. Local socket: {}",
         socket.display()
@@ -392,6 +442,17 @@ pub fn run(root: PathBuf, config: PathBuf, server: Url) -> Result<()> {
             inventory(&state)?;
             state.prune()?;
             scanned = Instant::now();
+            // Restarting ends managed provider processes, so updates wait until none run.
+            if staged.lock().unwrap().is_some()
+                && !state.policy()?.manual_updates
+                && !state
+                    .sessions()?
+                    .iter()
+                    .any(|s| s.source == "managed" && s.live)
+            {
+                updating = true;
+                break;
+            }
         }
         match listener.accept() {
             Ok((mut stream, _)) => {
@@ -410,9 +471,16 @@ pub fn run(root: PathBuf, config: PathBuf, server: Url) -> Result<()> {
             Err(e) => return Err(e.into()),
         }
     }
+    running.store(false, Ordering::SeqCst);
     drop(providers);
     let _ = worker.join();
     let _ = fs::remove_file(socket);
+    if updating && let Some(path) = staged.lock().unwrap().take() {
+        drop(listener);
+        drop(lock);
+        eprintln!("Restarting into the verified Roundtable release.");
+        crate::update::apply(&path, &exe)?;
+    }
     Ok(())
 }
 

@@ -576,35 +576,7 @@ pub fn scan(state: &State, system: &mut System) -> Result<(usize, bool)> {
         )
         && let Ok(rows) = serde_json::from_slice::<Vec<Value>>(&output)
     {
-        for row in rows {
-            let Some(id) = row["sessionId"].as_str().filter(|s| valid_id(s)) else {
-                continue;
-            };
-            let Some(p) = processes
-                .iter()
-                .find(|p| Some(p.pid as u64) == row["pid"].as_u64())
-            else {
-                continue;
-            };
-            let mut session = state.session(&format!("claude:{id}")).unwrap_or_else(|_| {
-                Session::new("claude", id, row["cwd"].as_str().unwrap_or(""), "process")
-            });
-            if session.source == "managed" {
-                continue;
-            }
-            session.live = true;
-            session.pid = Some(p.pid);
-            session.process_start = Some(p.start);
-            session.observed_at = now();
-            session.state = match row["status"].as_str() {
-                Some("idle") => "idle",
-                Some("running" | "working" | "busy") => "working",
-                Some("waiting") => "waiting",
-                _ => "unknown",
-            }
-            .into();
-            state.save_session(&session)?;
-        }
+        live_agents(state, &processes, rows)?;
     }
     let identities: HashMap<_, _> = processes.iter().map(|p| (p.pid, p.start)).collect();
     for mut session in state.sessions()? {
@@ -622,6 +594,43 @@ pub fn scan(state: &State, system: &mut System) -> Result<(usize, bool)> {
         }
     }
     Ok((processes.len(), ok))
+}
+
+fn live_agents(state: &State, processes: &[Process], rows: Vec<Value>) -> Result<()> {
+    for row in rows {
+        let Some(id) = row["sessionId"].as_str().filter(|s| valid_id(s)) else {
+            continue;
+        };
+        let Some(p) = processes
+            .iter()
+            .find(|p| Some(p.pid as u64) == row["pid"].as_u64())
+        else {
+            continue;
+        };
+        // Only sessions with a transcript have anything to show; `claude -p
+        // --no-session-persistence` children are listed here but never write one.
+        let key = format!("claude:{id}");
+        if state.get(&format!("transcript:{key}"))?.is_none() {
+            continue;
+        }
+        let mut session = state.session(&key)?;
+        if session.source == "managed" {
+            continue;
+        }
+        session.live = true;
+        session.pid = Some(p.pid);
+        session.process_start = Some(p.start);
+        session.observed_at = now();
+        session.state = match row["status"].as_str() {
+            Some("idle") => "idle",
+            Some("running" | "working" | "busy") => "working",
+            Some("waiting") => "waiting",
+            _ => "unknown",
+        }
+        .into();
+        state.save_session(&session)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -663,6 +672,34 @@ mod tests {
         assert_eq!(rows[1]["text"], "visible prompt");
         assert!(rows[2].get("text").is_none());
         assert_eq!(session.collection, "metadata");
+        Ok(())
+    }
+
+    #[test]
+    fn claude_agents_without_a_transcript_are_not_inventoried() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let state = State::open(tmp.path().join("state"))?;
+        let path = tmp.path().join("kept.jsonl");
+        fs::write(&path, "{\"sessionId\":\"kept\",\"cwd\":\"/tmp\"}\n")?;
+        tail(&state, &path, "claude", &[])?;
+        let process = |pid| Process {
+            pid,
+            start: 1,
+            provider: "claude".into(),
+            files: HashSet::new(),
+        };
+        live_agents(
+            &state,
+            &[process(1), process(2)],
+            vec![
+                json!({"pid":1,"sessionId":"kept","cwd":"/tmp","status":"idle"}),
+                json!({"pid":2,"sessionId":"phantom","cwd":"/tmp","status":"busy"}),
+            ],
+        )?;
+        let kept = state.session("claude:kept")?;
+        assert!(kept.live);
+        assert_eq!(kept.state, "idle");
+        assert!(state.session("claude:phantom").is_err());
         Ok(())
     }
 
