@@ -307,9 +307,14 @@ impl Api<'_> {
             );
             return Ok(bank.into());
         }
+        // Bots made by an earlier `init` have private banks (agent-<32 hex>) this key can write.
+        let private = |bank: &str| {
+            bank.strip_prefix("agent-")
+                .is_some_and(|id| id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+        };
         let candidates: Vec<_> = writable
             .into_iter()
-            .filter(|bank| *bank != "shared-notes")
+            .filter(|bank| *bank != "shared-notes" && !private(bank))
             .collect();
         match candidates.as_slice() {
             [bank] => Ok((*bank).into()),

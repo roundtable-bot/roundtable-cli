@@ -105,5 +105,6 @@ test("the brief cites every claim, and its sources resolve", async () => {
   const refs = new Set([...body.matchAll(/\[S(\d+)\]/g)].map((m) => m[1]));
   assert.deepEqual([...refs].sort((a, b) => a - b), rows.map((r) => r[1]));
   assert.match(md, /3 of 40 cross-checks between the documents failed/);
+  assert.deepEqual([...md.matchAll(/(\d+) other checks passed/g)].map((m) => m[1]), ["19", "18"]);
   assert.match(md, /Kestrelon Labs: -\$9\.8M/);
 });
