@@ -533,6 +533,10 @@ fn hidden_prompt_never_echoes_and_restores_terminal_on_success_or_cancel() -> Re
                 writeln!(master, "{key}")?;
             }
             loop {
+                // On macOS an exiting session leader waits until its terminal output is read.
+                if let Ok(n) = master.read(&mut buffer) {
+                    output.extend_from_slice(&buffer[..n]);
+                }
                 if let Some(status) = child.try_wait()? {
                     ensure!(status.success(), "Hidden prompt child failed");
                     break;
@@ -550,6 +554,7 @@ fn hidden_prompt_never_echoes_and_restores_terminal_on_success_or_cancel() -> Re
             assert!(!String::from_utf8_lossy(&output).contains(&key));
             Ok(())
         })();
+        drop(master); // Releases a child blocked on unread terminal output so wait() returns.
         let _ = child.kill();
         let _ = child.wait();
         result?;
