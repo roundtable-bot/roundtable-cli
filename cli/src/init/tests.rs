@@ -314,7 +314,7 @@ fn provisions_with_fresh_request_ids_suffix_retries_and_create_only_seed() -> Re
         vec![
             (
                 200,
-                json!([{"bank":"shared-notes","access":"write"},{"bank":"acme-team","access":"write"},{"bank":"read-only","access":"read"}]),
+                json!([{"bank":"shared-notes","access":"write"},{"bank":"acme-team","access":"write"},{"bank":"agent-0123456789abcdef0123456789abcdef","access":"write"},{"bank":"read-only","access":"read"}]),
             ),
             (409, json!({"error":"red-flags already exists"})),
             (409, json!({"error":"red-flags-2 already exists"})),

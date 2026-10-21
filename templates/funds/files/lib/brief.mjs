@@ -60,8 +60,7 @@ export function renderBrief(results) {
 
     out.push("### Cross-checks", "");
     for (const c of d.checks.filter((x) => !x.ok)) out.push(`- **Failed:** ${claim(`${c.label} (${c.quarter}): ${c.detail}`, src(d, c.files))}`);
-    const failedIds = new Set(d.checks.filter((c) => !c.ok).map((c) => c.id));
-    const passed = d.checks.filter((c) => c.ok && !failedIds.has(c.id));
+    const passed = d.checks.filter((c) => c.ok);
     out.push(`- ${claim(`${passed.length} other checks passed, covering: ${[...new Set(passed.map((c) => c.label))].join("; ")}.`, src(d, reportFiles(d)))}`, "");
   }
   out.push(table(), "");
