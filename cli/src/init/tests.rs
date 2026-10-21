@@ -465,6 +465,11 @@ fn hidden_prompt_never_echoes_and_restores_terminal_on_success_or_cancel() -> Re
                 result.is_ok_and(|key| Some(key) == std::env::var("ROUNDTABLE_PROMPT_INPUT").ok())
             );
         }
+        // Checked here: on macOS the parent's terminal handle is revoked when this session
+        // leader exits.
+        let mut state = std::mem::MaybeUninit::<libc::termios>::uninit();
+        assert_eq!(unsafe { libc::tcgetattr(0, state.as_mut_ptr()) }, 0);
+        assert_ne!(unsafe { state.assume_init() }.c_lflag & libc::ECHO, 0);
         return Ok(());
     }
     for cancel in [false, true] {
@@ -550,7 +555,6 @@ fn hidden_prompt_never_echoes_and_restores_terminal_on_success_or_cancel() -> Re
                 }
                 output.extend_from_slice(&buffer[..n]);
             }
-            assert_ne!(terminal()?.c_lflag & libc::ECHO, 0);
             assert!(!String::from_utf8_lossy(&output).contains(&key));
             Ok(())
         })();
