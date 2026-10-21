@@ -1,6 +1,7 @@
 mod credentials;
 mod daemon;
 mod discovery;
+mod init;
 mod providers;
 mod service;
 mod state;
@@ -35,6 +36,18 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Create an SDK project and provision its bots using a team key
+    Init {
+        #[arg(default_value = ".")]
+        dir: PathBuf,
+        #[arg(long, value_parser = ["diligence", "sourcing", "portfolio", "funds"])]
+        template: String,
+        #[arg(long)]
+        project: Option<String>,
+        /// Allow replacing project files in a non-empty directory
+        #[arg(long)]
+        force: bool,
+    },
     /// Inspect delivery receipts and resolve uncertain outcomes after checking the provider
     #[command(name = "commands")]
     Receipts {
@@ -513,6 +526,15 @@ fn login(
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+    if let Commands::Init {
+        dir,
+        template,
+        project,
+        force,
+    } = &cli.command
+    {
+        return init::run(&cli.server, dir, template, project.as_deref(), *force);
+    }
     let root = cli
         .config_dir
         .or_else(|| directories::BaseDirs::new().map(|d| d.config_dir().join("roundtable")))

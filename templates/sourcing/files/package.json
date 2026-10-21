@@ -1,0 +1,11 @@
+{
+  "name": "founder-sourcing",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=20.6" },
+  "scripts": {
+    "dev": "node --env-file=.env dev.mjs",
+    "shortlist": "node --env-file=.env shortlist.mjs"
+  },
+  "dependencies": { "@roundtable/sdk": "^0.1.0" }
+}

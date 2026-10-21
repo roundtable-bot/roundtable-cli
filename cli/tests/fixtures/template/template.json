@@ -1,0 +1,7 @@
+{
+  "track": "diligence",
+  "title": "Synthetic test project",
+  "bots": [{"name": "red-flags", "role": "reviewer", "env": "RED_FLAGS_KEY"}],
+  "seed": [{"from": "seed/deck.md", "to": "dataroom/acme/deck.md"}],
+  "next_steps": ["npm install", "npm run dev"]
+}

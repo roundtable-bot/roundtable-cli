@@ -6,13 +6,34 @@ Install the npm tarball from the public GitHub release. No npm registry account 
 binary; it does not build Rust or start background services. Node 20+ is required for npm.
 
 ```sh
-roundtable_package="https://github.com/roundtable-bot/roundtable-cli/releases/download/v0.2.12/roundtable-cli-0.2.12.tgz"
+roundtable_package="https://github.com/roundtable-bot/roundtable-cli/releases/download/v0.2.13/roundtable-cli-0.2.13.tgz"
 npm install -g --allow-remote=root --allow-scripts="$roundtable_package" "$roundtable_package"
 roundtable login
 roundtable setup
 ```
 
 Open https://roundtable.bot/cli/sessions to view machines, sessions, activity and usage.
+
+Create a hackathon SDK project with a template embedded in the native binary:
+
+```sh
+roundtable init acme --template diligence
+# Optional: --server http://localhost:8000 --project acme-team --force
+```
+
+Choose `diligence`, `sourcing`, `portfolio`, or `funds`. The command reads a team
+key from `ROUNDTABLE_KEY` or a hidden terminal prompt; it does not use or save a
+machine login. Copy a team key from Agents → Connect agent. A single writable
+team bank is selected automatically; use `--project BANK` when several are available.
+Bot keys and their actual names are written to `.env` with mode 0600, and `.env`
+is added to `.gitignore`. Seed files already in the bank are skipped. Choose an
+empty destination or use `--force` to allow replacing project files.
+
+Source builds embed available files from the repository's top-level `templates/`
+directory at compile time, without downloading templates. Missing or incomplete
+templates produce a runtime error explaining how to rebuild with the complete
+template. Test fixtures under `cli/tests/fixtures/` are never shipped as templates.
+
 Installation alone does not read or upload conversations. `setup` enables metadata monitoring
 at user login. Enable visible prompt/response collection for selected projects and remote control:
 

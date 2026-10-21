@@ -1,0 +1,43 @@
+{
+  "track": "portfolio",
+  "title": "Portfolio: early warnings from founder updates",
+  "bots": [
+    { "name": "watcher", "role": "researcher", "env": "WATCHER_KEY" },
+    { "name": "digest", "role": "writer", "env": "DIGEST_KEY" }
+  ],
+  "seed": [
+    { "from": "seed/companies.csv", "to": "portfolio/companies.csv" },
+    { "from": "seed/watch-policy.md", "to": "portfolio/watch-policy.md" },
+    { "from": "seed/updates/ashgrove-systems.md", "to": "portfolio/updates/ashgrove-systems.md" },
+    { "from": "seed/updates/bellwether-ai.md", "to": "portfolio/updates/bellwether-ai.md" },
+    { "from": "seed/updates/copperline.md", "to": "portfolio/updates/copperline.md" },
+    { "from": "seed/updates/dovetail-data.md", "to": "portfolio/updates/dovetail-data.md" },
+    { "from": "seed/updates/eastlake-mobility.md", "to": "portfolio/updates/eastlake-mobility.md" },
+    { "from": "seed/updates/fernhollow-health.md", "to": "portfolio/updates/fernhollow-health.md" },
+    { "from": "seed/updates/foxglove-cyber.md", "to": "portfolio/updates/foxglove-cyber.md" },
+    { "from": "seed/updates/glasswing-pay.md", "to": "portfolio/updates/glasswing-pay.md" },
+    { "from": "seed/updates/harrow-health.md", "to": "portfolio/updates/harrow-health.md" },
+    { "from": "seed/updates/ironbark-grid.md", "to": "portfolio/updates/ironbark-grid.md" },
+    { "from": "seed/updates/juniper-ledger.md", "to": "portfolio/updates/juniper-ledger.md" },
+    { "from": "seed/updates/kestrel-freight-tools.md", "to": "portfolio/updates/kestrel-freight-tools.md" },
+    { "from": "seed/updates/kinfolk-market.md", "to": "portfolio/updates/kinfolk-market.md" },
+    { "from": "seed/updates/larkfield-labs.md", "to": "portfolio/updates/larkfield-labs.md" },
+    { "from": "seed/updates/lumen-harbor.md", "to": "portfolio/updates/lumen-harbor.md" },
+    { "from": "seed/updates/marlow-bio.md", "to": "portfolio/updates/marlow-bio.md" },
+    { "from": "seed/updates/mossgate-robotics.md", "to": "portfolio/updates/mossgate-robotics.md" },
+    { "from": "seed/updates/nightjar-labs.md", "to": "portfolio/updates/nightjar-labs.md" },
+    { "from": "seed/updates/oakhurst-supply.md", "to": "portfolio/updates/oakhurst-supply.md" },
+    { "from": "seed/updates/orchard-analytics.md", "to": "portfolio/updates/orchard-analytics.md" },
+    { "from": "seed/updates/pellucid.md", "to": "portfolio/updates/pellucid.md" },
+    { "from": "seed/updates/pocketbook.md", "to": "portfolio/updates/pocketbook.md" },
+    { "from": "seed/updates/quarry-works.md", "to": "portfolio/updates/quarry-works.md" },
+    { "from": "seed/updates/quillpoint-payments.md", "to": "portfolio/updates/quillpoint-payments.md" },
+    { "from": "seed/updates/redwater-pay.md", "to": "portfolio/updates/redwater-pay.md" },
+    { "from": "seed/updates/sable-dynamics.md", "to": "portfolio/updates/sable-dynamics.md" },
+    { "from": "seed/updates/stonefruit.md", "to": "portfolio/updates/stonefruit.md" },
+    { "from": "seed/updates/tamarind-cloud.md", "to": "portfolio/updates/tamarind-cloud.md" },
+    { "from": "seed/updates/tidemark-security.md", "to": "portfolio/updates/tidemark-security.md" },
+    { "from": "seed/updates/wickerlight-learning.md", "to": "portfolio/updates/wickerlight-learning.md" }
+  ],
+  "next_steps": ["npm install", "npm run dev", "npm run digest"]
+}
