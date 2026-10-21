@@ -19,8 +19,6 @@ npm run brief   # in a second terminal: saves quarter-brief.md and funds/briefs/
 
 If `npm run brief` times out after five minutes, the fund-reader is not running: check `npm run dev`.
 
-`@roundtable/sdk` is not published to npm yet. If `npm install` fails with a 404, see `docs/sdk-quickstart.md` in the Roundtable repository for how to install the SDK from a local checkout.
-
 ## Make it yours
 
 1. **Add a check.** `checkFund()` in `bots/fund-reader.mjs` builds the list of checks with `add(id, quarter, label, ok, detail)`. For example, compare management fees with 2% of the commitment, or flag a single markdown larger than 10% of NAV.

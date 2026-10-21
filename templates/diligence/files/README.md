@@ -21,8 +21,6 @@ npm run memo    # in a second terminal: sends work to the bots and saves memos/a
 
 `npm run memo` also saves the memo to the bank as `memos/acme.md`. If it times out after five minutes, the bots are not running: check that `npm run dev` is up.
 
-`@roundtable/sdk` is not published to npm yet. If `npm install` fails with a 404, see `docs/sdk-quickstart.md` in the Roundtable repository for how to install the SDK from a local checkout.
-
 ## Make it yours
 
 1. **Add a rule.** In `bots/red-flags.mjs`, write an object like the ones in `RULES` and add it to the list. A rule gets the data room as `{ "deck.md": "...", ... }` and returns `{ flag, metrics }`. Rules are pure functions, so you can try them in `node` without Roundtable.

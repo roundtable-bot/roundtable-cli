@@ -19,8 +19,6 @@ npm run shortlist   # in a second terminal: saves shortlist.md and sourcing/shor
 
 If `npm run shortlist` times out after five minutes, the scout is not running: check `npm run dev`.
 
-`@roundtable/sdk` is not published to npm yet. If `npm install` fails with a 404, see `docs/sdk-quickstart.md` in the Roundtable repository for how to install the SDK from a local checkout.
-
 ## Make it yours
 
 1. **Change the scoring.** `scoreFounder()` and `weigh()` in `bots/scout.mjs` turn signals into points. They follow the table in `sourcing/thesis.md` in the bank, so change both. For example, reward `paper` signals more, or count a hackathon only when it was won.

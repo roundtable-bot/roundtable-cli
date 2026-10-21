@@ -19,8 +19,6 @@ npm run digest   # in a second terminal: saves early-warnings.md and portfolio/e
 
 If `npm run digest` times out after five minutes, the watcher is not running: check `npm run dev`.
 
-`@roundtable/sdk` is not published to npm yet. If `npm install` fails with a 404, see `docs/sdk-quickstart.md` in the Roundtable repository for how to install the SDK from a local checkout.
-
 ## Make it yours
 
 1. **Change a rule.** `assess()` in `bots/watcher.mjs` holds the rules, and `portfolio/watch-policy.md` in the bank describes them, so change both. For example, make runway red below 9 months, or add a rule for customer concentration.
