@@ -1,0 +1,18 @@
+{
+  "track": "diligence",
+  "title": "Diligence: underwrite a startup in an hour",
+  "bots": [
+    { "name": "memo-writer", "role": "writer", "env": "MEMO_WRITER_KEY" },
+    { "name": "red-flags", "role": "reviewer", "env": "RED_FLAGS_KEY" },
+    { "name": "comps", "role": "researcher", "env": "COMPS_KEY" },
+    { "name": "market", "role": "researcher", "env": "MARKET_KEY" }
+  ],
+  "seed": [
+    { "from": "seed/dataroom-acme/deck.md", "to": "dataroom/acme/deck.md" },
+    { "from": "seed/dataroom-acme/financial-model.csv", "to": "dataroom/acme/financial-model.csv" },
+    { "from": "seed/dataroom-acme/cohorts.csv", "to": "dataroom/acme/cohorts.csv" },
+    { "from": "seed/dataroom-acme/hiring-plan.csv", "to": "dataroom/acme/hiring-plan.csv" },
+    { "from": "seed/dataroom-acme/contracts-summary.md", "to": "dataroom/acme/contracts-summary.md" }
+  ],
+  "next_steps": ["npm install", "npm run dev", "npm run memo"]
+}

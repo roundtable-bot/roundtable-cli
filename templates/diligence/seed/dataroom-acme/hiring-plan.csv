@@ -1,0 +1,18 @@
+role,department,start_month,base_salary_usd,loaded_monthly_cost_usd
+Senior Account Executive,Sales,2026-10,165000,16775
+Staff Backend Engineer,Engineering,2026-10,205000,20842
+Account Executive,Sales,2026-11,150000,15250
+Machine Learning Engineer,Engineering,2026-11,195000,19825
+Head of Marketing,Marketing,2026-12,190000,19317
+Backend Engineer,Engineering,2026-12,175000,17792
+Sales Development Representative,Sales,2027-01,85000,8642
+Product Designer,Product,2027-01,150000,15250
+Frontend Engineer,Engineering,2027-01,170000,17283
+Controller,G&A,2027-02,175000,17792
+Account Executive,Sales,2027-02,150000,15250
+Security Engineer,Engineering,2027-03,200000,20333
+Sales Development Representative,Sales,2027-03,85000,8642
+VP Sales,Sales,2027-04,230000,23383
+Data Engineer,Engineering,2027-04,180000,18300
+Product Manager,Product,2027-05,170000,17283
+Backend Engineer,Engineering,2027-06,175000,17792

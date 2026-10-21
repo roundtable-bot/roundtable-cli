@@ -1,0 +1,25 @@
+{
+  "track": "funds",
+  "title": "Funds: what moved since last quarter",
+  "bots": [
+    { "name": "fund-reader", "role": "researcher", "env": "FUND_READER_KEY" },
+    { "name": "quarter-brief", "role": "writer", "env": "QUARTER_BRIEF_KEY" }
+  ],
+  "seed": [
+    { "from": "seed/lp.md", "to": "funds/lp.md" },
+    { "from": "seed/halyard-iii/capital-call-2026-02-10.md", "to": "funds/halyard-iii/capital-call-2026-02-10.md" },
+    { "from": "seed/halyard-iii/capital-call-2026-04-14.md", "to": "funds/halyard-iii/capital-call-2026-04-14.md" },
+    { "from": "seed/halyard-iii/capital-call-2026-06-03.md", "to": "funds/halyard-iii/capital-call-2026-06-03.md" },
+    { "from": "seed/halyard-iii/k1-summary-2025.md", "to": "funds/halyard-iii/k1-summary-2025.md" },
+    { "from": "seed/halyard-iii/q1-2026-report.md", "to": "funds/halyard-iii/q1-2026-report.md" },
+    { "from": "seed/halyard-iii/q2-2026-report.md", "to": "funds/halyard-iii/q2-2026-report.md" },
+    { "from": "seed/cinder-peak-ii/capital-call-2026-03-05.md", "to": "funds/cinder-peak-ii/capital-call-2026-03-05.md" },
+    { "from": "seed/cinder-peak-ii/capital-call-2026-05-20.md", "to": "funds/cinder-peak-ii/capital-call-2026-05-20.md" },
+    { "from": "seed/cinder-peak-ii/distribution-notice-2026-02-24.md", "to": "funds/cinder-peak-ii/distribution-notice-2026-02-24.md" },
+    { "from": "seed/cinder-peak-ii/distribution-notice-2026-06-16.md", "to": "funds/cinder-peak-ii/distribution-notice-2026-06-16.md" },
+    { "from": "seed/cinder-peak-ii/k1-summary-2025.md", "to": "funds/cinder-peak-ii/k1-summary-2025.md" },
+    { "from": "seed/cinder-peak-ii/q1-2026-report.md", "to": "funds/cinder-peak-ii/q1-2026-report.md" },
+    { "from": "seed/cinder-peak-ii/q2-2026-report.md", "to": "funds/cinder-peak-ii/q2-2026-report.md" }
+  ],
+  "next_steps": ["npm install", "npm run dev", "npm run brief"]
+}
