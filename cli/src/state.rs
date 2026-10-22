@@ -146,7 +146,8 @@ impl State {
             CREATE TABLE IF NOT EXISTS cursors(path TEXT PRIMARY KEY,inode TEXT NOT NULL,offset INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS usage_items(session TEXT,item TEXT,data TEXT,PRIMARY KEY(session,item));
             CREATE TABLE IF NOT EXISTS provider_items(session TEXT,item TEXT,length INTEGER,hash TEXT,seen REAL,PRIMARY KEY(session,item));
-            CREATE TABLE IF NOT EXISTS commands(id TEXT PRIMARY KEY,data TEXT NOT NULL,status TEXT NOT NULL,code TEXT NOT NULL);")?;
+            CREATE TABLE IF NOT EXISTS commands(id TEXT PRIMARY KEY,data TEXT NOT NULL,status TEXT NOT NULL,code TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS fetch_results(id TEXT PRIMARY KEY,data TEXT NOT NULL,at REAL NOT NULL);")?;
         let state = Self { db, root };
         if state.get("stream_id")?.is_none() {
             state.set("stream_id", &uuid::Uuid::new_v4().to_string())?;
@@ -271,6 +272,122 @@ impl State {
             json!({"cursor":values.last().and_then(|v|v["seq"].as_i64()).unwrap_or(after),"events":values}),
         )
     }
+    /// Full text of one event plus its continuation chunks, answering a server fetch for
+    /// output the server stored compactly. Errors say why this machine cannot answer.
+    pub fn tool_output(&self, session_id: &str, seq: i64) -> Result<Value> {
+        let session = self
+            .session(session_id)
+            .map_err(|_| anyhow::anyhow!("Session is not known on this machine"))?;
+        if !self.policy()?.content(&session.project) {
+            bail!("Conversation content is not shared for this project");
+        }
+        // Stream the run of continuation records; stop at 64 KB of text or 4,096 records.
+        let mut stmt = self
+            .db
+            .prepare("SELECT seq,data FROM events WHERE seq>=? ORDER BY seq")?;
+        let mut rows = stmt.query([seq])?;
+        let mut text = String::new();
+        let mut truncated = false;
+        let mut index = 0usize;
+        while let Some(row) = rows.next()? {
+            let (row_seq, data): (i64, String) = (row.get(0)?, row.get(1)?);
+            let value: Value = serde_json::from_str(&data)?;
+            if index == 0 {
+                if row_seq != seq || value["session_id"] != session_id {
+                    break;
+                }
+            } else if value["append"] != true || value["session_id"] != session_id {
+                break;
+            }
+            if index >= 4096 {
+                truncated = true;
+                break;
+            }
+            index += 1;
+            let chunk = value["text"].as_str().unwrap_or("");
+            let room = 65536 - text.len();
+            if chunk.len() > room {
+                let cut = (0..=room)
+                    .rev()
+                    .find(|i| chunk.is_char_boundary(*i))
+                    .unwrap_or(0);
+                text.push_str(&chunk[..cut]);
+                truncated = true;
+                break;
+            }
+            text.push_str(chunk);
+        }
+        if index == 0 {
+            bail!("Event is no longer available on this machine");
+        }
+        Ok(json!({"text":text,"truncated":truncated}))
+    }
+    pub fn save_fetch_result(&self, id: &str, session_id: &str, value: &Value) -> Result<()> {
+        self.db.execute(
+            "INSERT OR IGNORE INTO fetch_results VALUES (?,?,?)",
+            params![
+                id,
+                serde_json::to_string(&json!({"session_id":session_id,"result":value}))?,
+                now()
+            ],
+        )?;
+        Ok(())
+    }
+    /// Answers waiting for the next sync, each tagged with its id, within a byte budget.
+    /// Content policy is rechecked at upload time, so a session whose project stopped
+    /// sharing content answers with a refusal instead. Answers the server stopped asking
+    /// about expire after fifteen minutes.
+    pub fn fetch_results(&self, budget: usize) -> Result<Vec<Value>> {
+        self.db
+            .execute("DELETE FROM fetch_results WHERE at<?", [now() - 900.])?;
+        let policy = self.policy()?;
+        let mut stmt = self
+            .db
+            .prepare("SELECT id,data FROM fetch_results ORDER BY at,id")?;
+        let mut size = 0;
+        let mut items = vec![];
+        for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
+            let (id, data) = row?;
+            let saved: Value = serde_json::from_str(&data)?;
+            let shared = self
+                .session(saved["session_id"].as_str().unwrap_or(""))
+                .is_ok_and(|session| policy.content(&session.project));
+            let mut value = if shared {
+                saved["result"].clone()
+            } else {
+                json!({"error":"Conversation content is not shared for this project"})
+            };
+            value["id"] = json!(id);
+            let encoded = serde_json::to_vec(&value)?.len();
+            if size + encoded > budget {
+                break;
+            }
+            size += encoded;
+            items.push(value);
+        }
+        Ok(items)
+    }
+    pub fn fetch_pending(&self) -> Result<bool> {
+        Ok(self
+            .db
+            .query_row("SELECT EXISTS(SELECT 1 FROM fetch_results)", [], |r| {
+                r.get(0)
+            })?)
+    }
+    pub fn has_fetch_result(&self, id: &str) -> Result<bool> {
+        Ok(self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM fetch_results WHERE id=?)",
+            [id],
+            |r| r.get(0),
+        )?)
+    }
+    pub fn clear_fetch_results(&self, ids: &[String]) -> Result<()> {
+        for id in ids {
+            self.db
+                .execute("DELETE FROM fetch_results WHERE id=?", [id])?;
+        }
+        Ok(())
+    }
     pub fn prune(&self) -> Result<()> {
         let transaction = rusqlite::Transaction::new_unchecked(
             &self.db,
@@ -286,6 +403,8 @@ impl State {
         Ok(())
     }
     pub fn scrub_content(&self) -> Result<()> {
+        // Cached fetch answers may hold text the new policy no longer shares.
+        self.db.execute("DELETE FROM fetch_results", [])?;
         let policy = self.policy()?;
         for mut session in self.sessions()? {
             if !policy.content(&session.project) {
