@@ -90,7 +90,7 @@ for (const { track, dir } of templates) {
     const files = walk(join(dir, "files"));
     assert.ok(files.length < MAX_FILES);
     const pkg = JSON.parse(readFileSync(join(dir, "files/package.json"), "utf8"));
-    assert.equal(pkg.dependencies["@roundtable/sdk"], "^0.1.0");
+    assert.match(pkg.dependencies["@roundtable/sdk"], /^https:\/\/github\.com\/roundtable-bot\/roundtable-cli\/releases\/download\/sdk-v[\d.]+\/roundtable-sdk-[\d.]+\.tgz$/);
     assert.equal(Object.keys(pkg.dependencies).length, 1, "no dependencies besides the SDK");
     assert.ok(pkg.scripts.dev, "dev script");
     assert.equal(pkg.type, "module");

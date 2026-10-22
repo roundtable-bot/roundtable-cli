@@ -56,15 +56,24 @@ pub fn processes(system: &mut System) -> Vec<Process> {
         if p.user_id().is_none_or(|u| **u != uid) {
             continue;
         }
-        let name = p
-            .exe()
+        let exe = p.exe();
+        let name = exe
             .and_then(Path::file_name)
             .unwrap_or_default()
             .to_string_lossy();
         let args = p.cmd();
+        // Claude's native installer runs `~/.local/share/claude/versions/<version>`,
+        // so its executable name is a version number; the launched name is usually
+        // still `claude`, and the parent directory identifies IDE-style direct spawns.
+        let argv0 = args
+            .first()
+            .and_then(|s| Path::new(s).file_name())
+            .unwrap_or_default();
+        let native_claude =
+            exe.is_some_and(|e| e.parent().is_some_and(|d| d.ends_with("claude/versions")));
         let provider = if name == "codex" {
             Some("codex")
-        } else if name == "claude" || name == "claude.exe" {
+        } else if name == "claude" || name == "claude.exe" || argv0 == "claude" || native_claude {
             Some("claude")
         } else if name == "node" {
             args.get(1).and_then(|s| {
@@ -1101,5 +1110,91 @@ mod tests {
         assert_eq!(session.usage.cached_input_tokens, Some(100));
         assert_eq!(session.usage.output_tokens, Some(3));
         Ok(())
+    }
+    /// Long-lived child for process-detection tests: a copy of this test binary
+    /// running [`sleeper`]. Copied system binaries like `sleep` are killed on macOS,
+    /// which refuses to run Apple platform binaries from other paths.
+    #[cfg(unix)]
+    fn spawn_as(exe: &Path, arg0: &str) -> Result<std::process::Child> {
+        use std::os::unix::process::CommandExt;
+        Ok(std::process::Command::new(exe)
+            .arg0(arg0)
+            .args(["--ignored", "--exact", "discovery::tests::sleeper"])
+            .env("ROUNDTABLE_TEST_SLEEP", "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?)
+    }
+    #[cfg(unix)]
+    fn provider_of(pid: u32) -> Option<String> {
+        // Process tables can lag right after spawn, so retry briefly.
+        for _ in 0..20 {
+            let mut system = System::new();
+            if let Some(p) = processes(&mut system).into_iter().find(|p| p.pid == pid) {
+                return Some(p.provider);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        None
+    }
+    #[cfg(unix)]
+    fn sleep_binary() -> PathBuf {
+        std::env::current_exe().expect("test binary")
+    }
+    #[test]
+    #[ignore]
+    fn sleeper() {
+        if std::env::var_os("ROUNDTABLE_TEST_SLEEP").is_some() {
+            std::thread::sleep(std::time::Duration::from_secs(300));
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn detects_native_installer_claude_processes() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let versions = tmp.path().join("claude").join("versions");
+        fs::create_dir_all(&versions)?;
+        let exe = versions.join("9.9.9");
+        fs::copy(sleep_binary(), &exe)?;
+        let other = tmp.path().join("other").join("versions");
+        fs::create_dir_all(&other)?;
+        let unrelated = other.join("9.9.9");
+        fs::copy(sleep_binary(), &unrelated)?;
+        let mut children = vec![
+            (spawn_as(&exe, "claude")?, Some("claude")),
+            (spawn_as(&exe, "9.9.9")?, Some("claude")),
+            (spawn_as(&unrelated, "claude")?, Some("claude")),
+            (spawn_as(&unrelated, "9.9.9")?, None),
+        ];
+        let results: Vec<_> = children
+            .iter()
+            .map(|(child, expected)| (provider_of(child.id()), *expected))
+            .collect();
+        for (child, _) in &mut children {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        for (actual, expected) in results {
+            assert_eq!(actual.as_deref(), expected);
+        }
+        Ok(())
+    }
+    /// End-to-end check driven by CI: `ROUNDTABLE_EXPECT_CLAUDE_PID` names a real,
+    /// running Claude Code process that must be classified as `claude`.
+    #[test]
+    #[ignore]
+    fn detects_real_claude_process_from_env() {
+        let pid: u32 = std::env::var("ROUNDTABLE_EXPECT_CLAUDE_PID")
+            .expect("ROUNDTABLE_EXPECT_CLAUDE_PID")
+            .trim()
+            .parse()
+            .expect("pid");
+        let found = processes(&mut System::new());
+        let claude = found.iter().find(|p| p.pid == pid).unwrap_or_else(|| {
+            let seen: Vec<_> = found.iter().map(|p| (p.pid, &p.provider)).collect();
+            panic!("pid {pid} not detected; detected: {seen:?}")
+        });
+        assert_eq!(claude.provider, "claude");
     }
 }
