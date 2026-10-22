@@ -228,6 +228,12 @@ fn sync_once(state: &State, config: &Path, server: &Url, client: &Client) -> Res
     state.clear_fetch_results(&answered)?;
     state.set("last_ack", &ack.to_string())?;
     state.set("connection", "online")?;
+    if data["update_required"] == true {
+        // The server stores nothing from this version. Say so locally and stage the release
+        // now instead of after the usual retry back-off.
+        state.set("connection", "update required; run roundtable update")?;
+        state.set("update_attempt", "")?;
+    }
     state.set("last_sync", &now().to_string())?;
     let offered = data["sync_extensions"]
         .as_array()
@@ -375,7 +381,7 @@ fn prepare_update(state: &State, client: &Client, exe: &Path) -> Result<Option<P
 fn handle(state: &State, providers: &mut Providers, value: Value) -> Result<Value> {
     match value["op"].as_str().unwrap_or("") {
         "status" => Ok(
-            json!({"running":true,"pid":std::process::id(),"connection":state.get("connection")?,"last_sync":state.get("last_sync")?,"policy":state.policy()?}),
+            json!({"running":true,"pid":std::process::id(),"version":env!("CARGO_PKG_VERSION"),"connection":state.get("connection")?,"last_sync":state.get("last_sync")?,"policy":state.policy()?}),
         ),
         "list" => Ok(json!({"sessions":state.sessions()?})),
         "events" => state.events(
@@ -971,6 +977,67 @@ mod tests {
         let requests = server.join().unwrap()?;
         assert_eq!(requests[0]["events"], requests[1]["events"]);
         assert_eq!(requests[0]["events"][0]["text"], "retained event");
+        Ok(())
+    }
+
+    #[test]
+    fn a_required_update_is_reported_and_staged_without_back_off() -> Result<()> {
+        use std::net::TcpListener;
+        let tmp = tempfile::tempdir_in("/tmp")?;
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let url = Url::parse(&format!("http://{}/", listener.local_addr()?))?;
+        let config = tmp.path().join("config");
+        let store = Store::open(config.clone(), url.as_str())?;
+        store.save(
+            crate::credentials::Credential {
+                device_id: "test-device".into(),
+                account_id: "test-account".into(),
+                server: url.to_string(),
+                access_token: None,
+            },
+            "test-only-token",
+            true,
+        )?;
+        drop(store);
+        std::thread::spawn(move || -> Result<()> {
+            let (mut stream, _) = listener.accept()?;
+            let mut reader = BufReader::new(stream.try_clone()?);
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line)?;
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse()?;
+                }
+            }
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body)?;
+            let response = json!({"ack":0,"commands":[],"uncertain":[],"update_required":true,"cli_release":{"version":"9.9.9","sha256":{}}}).to_string();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",
+                response.len()
+            )?;
+            Ok(())
+        });
+        let state = State::open(tmp.path().join("state"))?;
+        state.set("device_id", "test-device")?;
+        state.set("update_attempt", "9.9.9:digest")?;
+        state.set("update_attempt_at", &now().to_string())?;
+        sync_once(&state, &config, &url, &client()?)?;
+        assert_eq!(
+            state.get("connection")?.as_deref(),
+            Some("update required; run roundtable update")
+        );
+        // The remembered attempt is cleared so the next loop stages at once.
+        assert_eq!(state.get("update_attempt")?.as_deref(), Some(""));
+        assert_eq!(
+            state.get("cli_release")?.as_deref(),
+            Some(r#"{"sha256":{},"version":"9.9.9"}"#)
+        );
         Ok(())
     }
 

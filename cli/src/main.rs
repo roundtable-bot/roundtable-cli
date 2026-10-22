@@ -106,6 +106,12 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Install the current release over this binary and restart the service with it
+    Update {
+        /// Update even while Roundtable-managed sessions run (restarting the service ends them)
+        #[arg(long)]
+        force: bool,
+    },
     /// Revoke this machine's credential and remove it locally
     Logout,
 }
@@ -541,7 +547,17 @@ fn run() -> Result<()> {
         .context("Cannot find a config directory; supply --config-dir")?;
     state::private_dir(&root)?;
     let agent_root = state::agent_root(&root, cli.server.as_str());
+    let client = Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .pool_idle_timeout(Duration::from_secs(3))
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(20))
+        .user_agent(concat!("roundtable-cli/", env!("CARGO_PKG_VERSION")))
+        .build()?;
     match cli.command {
+        Commands::Update { force } => {
+            return update::run(&client, &cli.server, &agent_root, &root, force);
+        }
         Commands::Receipts { command } => return receipt_command(&agent_root, command),
         Commands::Daemon => return daemon::run(agent_root, root, cli.server),
         Commands::Service { action } => {
@@ -582,13 +598,6 @@ fn run() -> Result<()> {
         _ => {}
     }
     let store = Store::open(root, cli.server.as_str())?;
-    let client = Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .pool_idle_timeout(Duration::from_secs(3))
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(20))
-        .user_agent(concat!("roundtable-cli/", env!("CARGO_PKG_VERSION")))
-        .build()?;
     match cli.command {
         Commands::Login {
             name,
@@ -606,21 +615,32 @@ fn run() -> Result<()> {
             let (_, token) = store
                 .load()?
                 .context("Not logged in. Run roundtable login.")?;
-            let info = response(
+            let mut info = response(
                 client
                     .get(endpoint(&cli.server, "/auth/device/session"))
                     .bearer_auth(token)
                     .send()?,
             )?;
+            // The background service reports its own connection state, including a required update.
+            let service = daemon::request(&agent_root, &json!({"op":"status"}))
+                .ok()
+                .map(|s| s["connection"].clone());
             if as_json {
+                info["service_connection"] = json!(service);
                 println!("{}", serde_json::to_string_pretty(&info)?);
             } else {
                 println!(
-                    "Connected to {}\nMachine: {}\nMachine ID: {}\nAccount: {}",
+                    "Connected to {}\nMachine: {}\nMachine ID: {}\nAccount: {}\nService: {}",
                     cli.server,
                     safe(info["name"].as_str().unwrap_or("unknown")),
                     safe(info["id"].as_str().unwrap_or("unknown")),
-                    safe(info["account_id"].as_str().unwrap_or("unknown"))
+                    safe(info["account_id"].as_str().unwrap_or("unknown")),
+                    safe(
+                        service
+                            .as_ref()
+                            .and_then(Value::as_str)
+                            .unwrap_or("not running")
+                    )
                 );
             }
             Ok(())

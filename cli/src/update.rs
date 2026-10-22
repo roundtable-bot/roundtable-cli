@@ -28,7 +28,7 @@ fn target() -> Option<&'static str> {
     }
 }
 
-fn version(v: &str) -> Option<[u64; 3]> {
+pub fn version(v: &str) -> Option<[u64; 3]> {
     let parts: Vec<u64> = v
         .split('.')
         .map(|p| {
@@ -100,11 +100,24 @@ pub fn stage(client: &Client, base: &str, next: &str, digest: &str, exe: &Path) 
     // Close the writable handle before executing it (Linux refuses busy text files).
     let staged = staged.into_temp_path();
     fs::set_permissions(&staged, fs::Permissions::from_mode(0o700))?;
-    let mut child = Command::new(&staged)
-        .arg("--version")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()?;
+    // Another thread's fork may briefly hold the file open for writing (ETXTBSY); retry.
+    let mut attempts = 0;
+    let mut child = loop {
+        match Command::new(&staged)
+            .arg("--version")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::ExecutableFileBusy && attempts < 40 =>
+            {
+                attempts += 1;
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            result => break result?,
+        }
+    };
     let deadline = Instant::now() + Duration::from_secs(10);
     while child.try_wait()?.is_none() {
         if Instant::now() > deadline {
@@ -180,11 +193,148 @@ pub fn apply(staged: &Path, exe: &Path) -> Result<()> {
         .into())
 }
 
+/// `roundtable update`: install the server's current release over this binary, then run the
+/// background service from it.
+pub fn run(
+    api: &Client,
+    server: &reqwest::Url,
+    root: &Path,
+    config: &Path,
+    force: bool,
+) -> Result<()> {
+    let release: Value = api
+        .get(server.join("/cli/release")?)
+        .send()?
+        .error_for_status()
+        .context("The server did not describe its current CLI release")?
+        .json()?;
+    let exe = fs::canonicalize(std::env::current_exe()?)?;
+    let installed = crate::service::installed(root)?;
+    let step = |action: &str| -> Result<()> {
+        // The new binary writes the service definition, so the service runs that version.
+        let status = Command::new(&exe)
+            .arg("--server")
+            .arg(server.as_str())
+            .arg("--config-dir")
+            .arg(config)
+            .args(["service", action])
+            .status()?;
+        if !status.success() {
+            bail!("roundtable service {action} failed; run it by hand");
+        }
+        Ok(())
+    };
+    let message = perform(
+        &client()?,
+        &release,
+        RELEASES,
+        &exe,
+        root,
+        installed,
+        force,
+        step,
+    )?;
+    println!("{message}");
+    Ok(())
+}
+
+/// Install the offered release over `exe` and run an installed service from this version.
+/// Refuses while Roundtable-managed sessions run unless forced, since restarting ends them.
+#[allow(clippy::too_many_arguments)]
+pub fn perform(
+    download: &Client,
+    release: &Value,
+    base: &str,
+    exe: &Path,
+    root: &Path,
+    installed: bool,
+    force: bool,
+    mut service: impl FnMut(&str) -> Result<()>,
+) -> Result<String> {
+    let current = env!("CARGO_PKG_VERSION");
+    let status = serde_json::json!({"op":"status"});
+    let daemon = crate::daemon::request(root, &status).ok();
+    // A service on another version (or one too old to say) is restarted from this binary.
+    let stale_service = installed && daemon.as_ref().is_some_and(|d| d["version"] != current);
+    let offer = offered(release, current);
+    if offer.is_none() && !stale_service {
+        return Ok(format!("Roundtable {current} is up to date"));
+    }
+    let managed_live = |running: bool| -> Result<usize> {
+        if !running || force {
+            return Ok(0);
+        }
+        let sessions = crate::daemon::request(root, &serde_json::json!({"op":"list"}))?;
+        Ok(sessions["sessions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|s| s["source"] == "managed" && s["live"] == true)
+            .count())
+    };
+    let managed = managed_live(daemon.is_some())?;
+    if managed > 0 {
+        bail!(
+            "{managed} Roundtable-managed session(s) are running; updating restarts the service and ends them. Finish them first, or rerun with --force."
+        );
+    }
+    let outcome = match &offer {
+        Some((next, digest)) => {
+            let staged = stage(download, base, next, digest, exe).with_context(|| {
+                format!(
+                    "Could not stage the update beside {}; the directory must be writable by you",
+                    exe.display()
+                )
+            })?;
+            // Keep the installed file's mode, for example a shared 0755 npm install.
+            if let Ok(existing) = fs::metadata(exe) {
+                fs::set_permissions(&staged, existing.permissions())?;
+            }
+            fs::rename(&staged, exe)?;
+            format!("Updated Roundtable {current} → {next}")
+        }
+        None => format!("Roundtable {current} is up to date"),
+    };
+    if !installed {
+        return Ok(format!("{outcome}. No background service is installed."));
+    }
+    // The download can take minutes; a session started meanwhile must not be ended.
+    let running = crate::daemon::request(root, &status).is_ok();
+    let managed = managed_live(running)?;
+    if managed > 0 {
+        bail!(
+            "{outcome}, but {managed} Roundtable-managed session(s) started meanwhile, so the service still runs its previous version. Finish them and run roundtable update again, or rerun with --force."
+        );
+    }
+    if running {
+        service("stop")?;
+        // The service manager returns before the daemon has exited.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while crate::daemon::request(root, &status).is_ok() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+    if let Err(error) = service("install").and_then(|()| service("start")) {
+        // The previous definition and binary are still installed unless install got that far.
+        let recovered = if service("start").is_ok() {
+            "The previously installed service was started again."
+        } else {
+            "The service is stopped."
+        };
+        bail!(
+            "{outcome}, but the service could not be reinstalled: {error:#}. {recovered} Finish by hand: roundtable service stop; roundtable service install; roundtable service start."
+        );
+    }
+    Ok(format!("{outcome}; service restarted."))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::cell::RefCell;
     use std::net::TcpListener;
+    use std::rc::Rc;
 
     fn release(next: &str, digest: &str) -> Value {
         json!({"version": next, "sha256": {target().unwrap(): digest}})
@@ -282,6 +432,270 @@ mod tests {
         confirmed(&exe);
         assert!(!rollback_due(&exe)?);
         assert_eq!(fs::read_dir(tmp.path())?.count(), 1);
+        Ok(())
+    }
+
+    fn gzip(text: String) -> Result<Vec<u8>> {
+        let mut child = Command::new("gzip")
+            .arg("-c")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()?;
+        child.stdin.take().unwrap().write_all(text.as_bytes())?;
+        Ok(child.wait_with_output()?.stdout)
+    }
+    fn release_of(packed: &[u8]) -> Value {
+        release("9.9.9", &format!("{:x}", Sha256::digest(packed)))
+    }
+
+    #[test]
+    fn update_command_reports_an_up_to_date_binary() -> Result<()> {
+        let tmp = tempfile::tempdir_in("/tmp")?;
+        let current = env!("CARGO_PKG_VERSION");
+        let message = perform(
+            &Client::new(),
+            &release(current, &"a".repeat(64)),
+            "http://127.0.0.1:1/",
+            &tmp.path().join("roundtable"),
+            &tmp.path().join("state"),
+            true,
+            false,
+            |_| panic!("no service step for an up-to-date binary"),
+        )?;
+        assert_eq!(message, format!("Roundtable {current} is up to date"));
+        Ok(())
+    }
+
+    #[test]
+    fn update_command_replaces_the_binary_and_reinstalls_an_installed_service() -> Result<()> {
+        let tmp = tempfile::tempdir_in("/tmp")?;
+        let exe = tmp.path().join("roundtable");
+        fs::write(&exe, "old binary")?;
+        fs::set_permissions(&exe, fs::Permissions::from_mode(0o755))?;
+        let packed = gzip("#!/bin/sh\necho roundtable 9.9.9\n".into())?;
+        let mut steps = vec![];
+        let message = perform(
+            &Client::new(),
+            &release_of(&packed),
+            &serve(packed.clone()),
+            &exe,
+            &tmp.path().join("state"),
+            true,
+            false,
+            |action| {
+                steps.push(action.to_owned());
+                Ok(())
+            },
+        )?;
+        assert_eq!(
+            message,
+            format!(
+                "Updated Roundtable {} → 9.9.9; service restarted.",
+                env!("CARGO_PKG_VERSION")
+            )
+        );
+        // Not running, so no stop; the new binary writes the service definition.
+        assert_eq!(steps, ["install", "start"]);
+        assert!(fs::read_to_string(&exe)?.contains("echo roundtable 9.9.9"));
+        // A shared install keeps its mode instead of the staged file's private 0700.
+        assert_eq!(fs::metadata(&exe)?.permissions().mode() & 0o777, 0o755);
+        assert_eq!(fs::read_dir(tmp.path())?.count(), 1);
+        fs::write(&exe, "old binary")?;
+        let message = perform(
+            &Client::new(),
+            &release_of(&packed),
+            &serve(packed),
+            &exe,
+            &tmp.path().join("state"),
+            false,
+            false,
+            |_| panic!("no service is installed"),
+        )?;
+        assert!(
+            message.ends_with("No background service is installed."),
+            "{message}"
+        );
+        Ok(())
+    }
+
+    /// A fake running daemon answering `status` and `list`; `managed` gives the live managed
+    /// session count for each successive `list` call (the last value repeats).
+    fn fake_daemon(root: &Path, version: Option<&str>, managed: Vec<usize>) -> Result<()> {
+        use std::io::{BufRead, BufReader};
+        use std::os::unix::net::UnixListener;
+        fs::create_dir_all(root)?;
+        let listener = UnixListener::bind(root.join("agent.sock"))?;
+        let version = version.map(str::to_owned);
+        std::thread::spawn(move || {
+            let mut lists = 0;
+            while let Ok((mut stream, _)) = listener.accept() {
+                let mut line = String::new();
+                if BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .is_err()
+                {
+                    break;
+                }
+                let request: Value = serde_json::from_str(&line).unwrap_or_default();
+                let reply = if request["op"] == "list" {
+                    let count = managed[lists.min(managed.len() - 1)];
+                    lists += 1;
+                    let sessions: Vec<Value> = (0..count)
+                        .map(|i| json!({"id":format!("codex:{i}"),"source":"managed","live":true}))
+                        .collect();
+                    json!({"sessions":sessions})
+                } else {
+                    let mut status = json!({"running":true});
+                    if let Some(version) = &version {
+                        status["version"] = json!(version);
+                    }
+                    status
+                };
+                let _ = writeln!(stream, "{reply}");
+            }
+        });
+        Ok(())
+    }
+    fn stop_removes_socket(
+        root: &Path,
+        steps: &Rc<RefCell<Vec<String>>>,
+    ) -> impl FnMut(&str) -> Result<()> {
+        let root = root.to_owned();
+        let steps = steps.clone();
+        move |action| {
+            if action == "stop" {
+                fs::remove_file(root.join("agent.sock"))?;
+            }
+            steps.borrow_mut().push(action.to_owned());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn update_command_refuses_while_managed_sessions_run_unless_forced() -> Result<()> {
+        let tmp = tempfile::tempdir_in("/tmp")?;
+        let exe = tmp.path().join("roundtable");
+        fs::write(&exe, "old binary")?;
+        let root = tmp.path().join("state");
+        fake_daemon(&root, Some(env!("CARGO_PKG_VERSION")), vec![1])?;
+        let packed = gzip("#!/bin/sh\necho roundtable 9.9.9\n".into())?;
+        let error = perform(
+            &Client::new(),
+            &release_of(&packed),
+            "http://127.0.0.1:1/",
+            &exe,
+            &root,
+            true,
+            false,
+            |_| panic!("refused before any service step"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("managed session"), "{error}");
+        assert_eq!(fs::read_to_string(&exe)?, "old binary");
+        let steps = Rc::new(RefCell::new(vec![]));
+        let message = perform(
+            &Client::new(),
+            &release_of(&packed),
+            &serve(packed),
+            &exe,
+            &root,
+            true,
+            true,
+            stop_removes_socket(&root, &steps),
+        )?;
+        assert!(message.ends_with("service restarted."), "{message}");
+        assert_eq!(*steps.borrow(), ["stop", "install", "start"]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_session_started_during_the_download_keeps_the_service_running() -> Result<()> {
+        let tmp = tempfile::tempdir_in("/tmp")?;
+        let exe = tmp.path().join("roundtable");
+        fs::write(&exe, "old binary")?;
+        let root = tmp.path().join("state");
+        // No managed session before the download, one afterwards.
+        fake_daemon(&root, Some(env!("CARGO_PKG_VERSION")), vec![0, 1])?;
+        let packed = gzip("#!/bin/sh\necho roundtable 9.9.9\n".into())?;
+        let error = perform(
+            &Client::new(),
+            &release_of(&packed),
+            &serve(packed),
+            &exe,
+            &root,
+            true,
+            false,
+            |_| panic!("the service must not be stopped"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("started meanwhile"), "{error}");
+        assert!(fs::read_to_string(&exe)?.contains("echo roundtable 9.9.9"));
+        Ok(())
+    }
+
+    #[test]
+    fn a_service_on_another_version_is_restarted_without_a_download() -> Result<()> {
+        let tmp = tempfile::tempdir_in("/tmp")?;
+        let exe = tmp.path().join("roundtable");
+        fs::write(&exe, "current binary")?;
+        let root = tmp.path().join("state");
+        // An older daemon does not report its version at all.
+        fake_daemon(&root, None, vec![0])?;
+        let current = env!("CARGO_PKG_VERSION");
+        let steps = Rc::new(RefCell::new(vec![]));
+        let message = perform(
+            &Client::new(),
+            &release(current, &"a".repeat(64)),
+            "http://127.0.0.1:1/",
+            &exe,
+            &root,
+            true,
+            false,
+            stop_removes_socket(&root, &steps),
+        )?;
+        assert_eq!(
+            message,
+            format!("Roundtable {current} is up to date; service restarted.")
+        );
+        assert_eq!(*steps.borrow(), ["stop", "install", "start"]);
+        assert_eq!(fs::read_to_string(&exe)?, "current binary");
+        Ok(())
+    }
+
+    #[test]
+    fn a_failed_reinstall_starts_the_previous_service_again_and_explains() -> Result<()> {
+        let tmp = tempfile::tempdir_in("/tmp")?;
+        let exe = tmp.path().join("roundtable");
+        fs::write(&exe, "old binary")?;
+        let root = tmp.path().join("state");
+        fake_daemon(&root, Some(env!("CARGO_PKG_VERSION")), vec![0])?;
+        let packed = gzip("#!/bin/sh\necho roundtable 9.9.9\n".into())?;
+        let mut steps = vec![];
+        let error = perform(
+            &Client::new(),
+            &release_of(&packed),
+            &serve(packed),
+            &exe,
+            &root,
+            true,
+            false,
+            |action| {
+                if action == "stop" {
+                    fs::remove_file(root.join("agent.sock"))?;
+                }
+                steps.push(action.to_owned());
+                if action == "install" {
+                    bail!("systemctl failed")
+                }
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("could not be reinstalled"), "{text}");
+        assert!(text.contains("started again"), "{text}");
+        assert!(text.contains("roundtable service install"), "{text}");
+        assert_eq!(steps, ["stop", "install", "start"]);
         Ok(())
     }
 }
