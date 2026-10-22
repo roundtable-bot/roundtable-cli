@@ -1,6 +1,6 @@
 {
   "name": "@roundtable/cli",
-  "version": "0.2.14",
+  "version": "0.2.15",
   "description": "Native machine monitoring and coding-session control for Roundtable",
   "license": "UNLICENSED",
   "repository": {
@@ -29,10 +29,10 @@
     "node": ">=20"
   },
   "optionalDependencies": {
-    "@roundtable/cli-darwin-arm64": "0.2.14",
-    "@roundtable/cli-darwin-x64": "0.2.14",
-    "@roundtable/cli-linux-arm64": "0.2.14",
-    "@roundtable/cli-linux-x64": "0.2.14"
+    "@roundtable/cli-darwin-arm64": "0.2.15",
+    "@roundtable/cli-darwin-x64": "0.2.15",
+    "@roundtable/cli-linux-arm64": "0.2.15",
+    "@roundtable/cli-linux-x64": "0.2.15"
   },
   "publishConfig": {
     "access": "public"
