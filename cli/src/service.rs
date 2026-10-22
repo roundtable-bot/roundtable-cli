@@ -103,6 +103,11 @@ pub fn definition(root: &Path, config: &Path, server: &Url, binary: &Path, mac: 
     }
 }
 
+/// Whether this installation's LaunchAgent or systemd unit exists.
+pub fn installed(root: &Path) -> Result<bool> {
+    Ok(service_file(root)?.exists())
+}
+
 pub fn manage(action: &str, root: &Path, config: &Path, server: &Url) -> Result<()> {
     let config = fs::canonicalize(config)?;
     let file = service_file(root)?;
