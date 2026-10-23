@@ -7,5 +7,5 @@
     "dev": "node --env-file=.env dev.mjs",
     "memo": "node --env-file=.env memo-writer.mjs"
   },
-  "dependencies": { "@roundtable/sdk": "https://github.com/roundtable-bot/roundtable-cli/releases/download/sdk-v0.1.0/roundtable-sdk-0.1.0.tgz" }
+  "dependencies": { "@roundtable/sdk": "https://github.com/roundtable-bot/roundtable-cli/releases/download/sdk-v0.1.1/roundtable-sdk-0.1.1.tgz" }
 }
