@@ -107,6 +107,7 @@ fn reconcile(state: &State, databases: &[PathBuf]) -> Result<()> {
         for host in runs {
             let mut session = state.session(&host.id).unwrap_or_else(|_| host.clone());
             if session.source == "managed"
+                || session.source == crate::hooks::SOURCE
                 || (session.live
                     && session.source != "hook"
                     && matches!(session.state.as_str(), "working" | "waiting" | "unknown"))

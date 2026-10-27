@@ -407,6 +407,11 @@ pub fn tail(state: &State, path: &Path, provider: &str, processes: &[Process]) -
     let Some(mut session) = identify(path, provider)? else {
         return Ok(());
     };
+    // Reserve the writer before reading the session or queue pressure: a hook ending the
+    // session meanwhile must not be overwritten with this older copy, and sync
+    // acknowledges concurrently.
+    let transaction =
+        rusqlite::Transaction::new_unchecked(&state.db, rusqlite::TransactionBehavior::Immediate)?;
     if let Ok(saved) = state.session(&session.id) {
         session = saved;
     }
@@ -438,9 +443,6 @@ pub fn tail(state: &State, path: &Path, provider: &str, processes: &[Process]) -
     let mut file = File::open(path)?;
     file.seek(SeekFrom::Start(offset))?;
     let mut reader = BufReader::new(file);
-    // Reserve the writer before reading queue pressure; sync acknowledges concurrently.
-    let transaction =
-        rusqlite::Transaction::new_unchecked(&state.db, rusqlite::TransactionBehavior::Immediate)?;
     let begin = offset;
     loop {
         // Leave unread records in the provider's durable transcript until uploads catch up.
@@ -476,7 +478,11 @@ pub fn tail(state: &State, path: &Path, provider: &str, processes: &[Process]) -
     let mapped = processes
         .iter()
         .find(|p| p.provider == provider && p.files.contains(path));
-    if session.source != "managed" && session.source != "app-server" {
+    // A session reached through host hooks keeps its liveness and capabilities.
+    if !matches!(
+        session.source.as_str(),
+        "managed" | "app-server" | crate::hooks::SOURCE
+    ) {
         session.live = mapped.is_some();
         session.pid = mapped.map(|p| p.pid);
         session.process_start = mapped.map(|p| p.start);
@@ -577,19 +583,16 @@ pub fn scan(state: &State, system: &mut System) -> Result<(usize, bool)> {
             ok = false;
         }
     }
-    // Claude's supported inventory maps interactive/background sessions without guessing by cwd.
-    if processes.iter().any(|p| p.provider == "claude")
-        && let Ok(output) = crate::providers::bounded_output(
-            std::process::Command::new("claude").args(["agents", "--json"]),
-            5,
-        )
-        && let Ok(rows) = serde_json::from_slice::<Vec<Value>>(&output)
-    {
-        live_agents(state, &processes, rows)?;
+    // Claude's session files map live sessions without guessing by cwd.
+    if processes.iter().any(|p| p.provider == "claude") {
+        live_agents(state, &processes, &home("claude").join("sessions"))?;
     }
     let identities: HashMap<_, _> = processes.iter().map(|p| (p.pid, p.start)).collect();
     for mut session in state.sessions()? {
-        if matches!(session.source.as_str(), "managed" | "app-server") {
+        if matches!(
+            session.source.as_str(),
+            "managed" | "app-server" | crate::hooks::SOURCE
+        ) {
             continue;
         }
         if session
@@ -605,19 +608,33 @@ pub fn scan(state: &State, system: &mut System) -> Result<(usize, bool)> {
     Ok((processes.len(), ok))
 }
 
-fn live_agents(state: &State, processes: &[Process], rows: Vec<Value>) -> Result<()> {
-    for row in rows {
+fn live_agents(state: &State, processes: &[Process], sessions_dir: &Path) -> Result<()> {
+    const MAX_SESSION_FILE: u64 = 64 * 1024;
+    // Only running Claude processes are looked up, so stale files left by crashes cost nothing.
+    for p in processes.iter().filter(|p| p.provider == "claude") {
+        let Ok(file) = File::open(sessions_dir.join(format!("{}.json", p.pid))) else {
+            continue;
+        };
+        let mut bytes = Vec::new();
+        if file
+            .take(MAX_SESSION_FILE + 1)
+            .read_to_end(&mut bytes)
+            .is_err()
+            || bytes.len() as u64 > MAX_SESSION_FILE
+        {
+            continue;
+        }
+        let Ok(row) = serde_json::from_slice::<Value>(&bytes) else {
+            continue;
+        };
+        if row["pid"].as_u64() != Some(p.pid as u64) {
+            continue;
+        }
         let Some(id) = row["sessionId"].as_str().filter(|s| valid_id(s)) else {
             continue;
         };
-        let Some(p) = processes
-            .iter()
-            .find(|p| Some(p.pid as u64) == row["pid"].as_u64())
-        else {
-            continue;
-        };
         // Only sessions with a transcript have anything to show; `claude -p
-        // --no-session-persistence` children are listed here but never write one.
+        // --no-session-persistence` children write session files but no transcript.
         let key = format!("claude:{id}");
         if state.get(&format!("transcript:{key}"))?.is_none() {
             continue;
@@ -688,6 +705,8 @@ mod tests {
     fn claude_agents_without_a_transcript_are_not_inventoried() -> Result<()> {
         let tmp = tempfile::tempdir()?;
         let state = State::open(tmp.path().join("state"))?;
+        let sessions = tmp.path().join("sessions");
+        fs::create_dir(&sessions)?;
         let path = tmp.path().join("kept.jsonl");
         fs::write(&path, "{\"sessionId\":\"kept\",\"cwd\":\"/tmp\"}\n")?;
         tail(&state, &path, "claude", &[])?;
@@ -697,18 +716,91 @@ mod tests {
             provider: "claude".into(),
             files: HashSet::new(),
         };
-        live_agents(
-            &state,
-            &[process(1), process(2)],
-            vec![
-                json!({"pid":1,"sessionId":"kept","cwd":"/tmp","status":"idle"}),
-                json!({"pid":2,"sessionId":"phantom","cwd":"/tmp","status":"busy"}),
-            ],
-        )?;
+        for row in [
+            json!({"pid":1,"sessionId":"kept","cwd":"/tmp","status":"idle"}),
+            json!({"pid":2,"sessionId":"phantom","cwd":"/tmp","status":"busy"}),
+        ] {
+            fs::write(
+                sessions.join(format!("{}.json", row["pid"])),
+                row.to_string(),
+            )?;
+        }
+        live_agents(&state, &[process(1), process(2)], &sessions)?;
         let kept = state.session("claude:kept")?;
         assert!(kept.live);
         assert_eq!(kept.state, "idle");
         assert!(state.session("claude:phantom").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn claude_session_files_update_only_live_unmanaged_sessions() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let state = State::open(tmp.path().join("state"))?;
+        let sessions = tmp.path().join("sessions");
+        fs::create_dir(&sessions)?;
+        let mut processes = Vec::new();
+        let cases = [
+            (1, "busy", "busy", "working"),
+            (2, "idle", "idle", "idle"),
+            (3, "wrong-pid", "busy", "unknown"),
+            (4, "wrong-provider", "busy", "unknown"),
+            (5, "managed", "busy", "unknown"),
+            (6, "malformed", "busy", "unknown"),
+            (7, "key", "busy", "unknown"),
+            (8, "oversized", "busy", "unknown"),
+        ];
+        for (pid, id, status, _) in cases {
+            let source = if id == "managed" {
+                "managed"
+            } else {
+                "transcript"
+            };
+            let mut session = Session::new("claude", id, "/tmp", source);
+            session.observed_at = 0.0;
+            state.save_session(&session)?;
+            state.set(&format!("transcript:{}", session.id), "fixture.jsonl")?;
+            processes.push(Process {
+                pid,
+                start: 1_792_867_000,
+                provider: if id == "wrong-provider" {
+                    "codex"
+                } else {
+                    "claude"
+                }
+                .into(),
+                files: HashSet::new(),
+            });
+            let row = json!({
+                "pid": if id == "wrong-pid" { 999 } else { pid },
+                "sessionId": id,
+                "status": status,
+                "procStart": "246914076",
+            });
+            let extension = if id == "key" { "key" } else { "json" };
+            let content = match id {
+                "malformed" => "{".into(),
+                "oversized" => format!("{}{}", row, " ".repeat(64 * 1024)),
+                _ => row.to_string(),
+            };
+            fs::write(sessions.join(format!("{pid}.{extension}")), content)?;
+        }
+        live_agents(&state, &processes, &sessions)?;
+        for (pid, id, _, expected) in cases {
+            let session = state.session(&format!("claude:{id}"))?;
+            assert_eq!(session.state, expected, "{id}");
+            if expected == "unknown" {
+                assert!(!session.live, "{id}");
+                assert_eq!(session.pid, None, "{id}");
+                assert_eq!(session.process_start, None, "{id}");
+                assert_eq!(session.observed_at, 0.0, "{id}");
+            } else {
+                assert!(session.live, "{id}");
+                assert_eq!(session.pid, Some(pid), "{id}");
+                assert_eq!(session.process_start, Some(1_792_867_000), "{id}");
+                assert!(session.observed_at > 0.0, "{id}");
+            }
+        }
         Ok(())
     }
 

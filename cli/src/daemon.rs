@@ -24,21 +24,44 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 pub fn request(root: &Path, value: &Value) -> Result<Value> {
+    request_within(
+        root,
+        value,
+        Duration::from_secs(if value["op"] == "start" { 45 } else { 15 }),
+    )
+}
+
+/// One request with `wait` as the total time from connecting to the full reply.
+pub fn request_within(root: &Path, value: &Value, wait: Duration) -> Result<Value> {
+    let started = Instant::now();
     let mut stream = UnixStream::connect(root.join("agent.sock"))
         .context("Service is not running. Run roundtable daemon or roundtable service start")?;
-    stream.set_read_timeout(Some(Duration::from_secs(if value["op"] == "start" {
-        45
-    } else {
-        15
-    })))?;
-    stream.set_write_timeout(Some(Duration::from_secs(3)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(3).min(wait)))?;
     serde_json::to_writer(&mut stream, value)?;
     stream.write_all(b"\n")?;
-    let mut response = String::new();
-    BufReader::new(stream)
-        .take(2_000_000)
-        .read_line(&mut response)?;
-    let result: Value = serde_json::from_str(&response)?;
+    // Each read gets only what is left of `wait`, so a reply arriving in pieces cannot
+    // stretch the total. (Connecting itself is not bounded; the socket is local.)
+    let mut response = Vec::new();
+    let mut chunk = [0u8; 8192];
+    while !response.ends_with(b"\n") {
+        let left = wait.saturating_sub(started.elapsed());
+        if left.is_zero() || response.len() > 2_000_000 {
+            bail!("No reply from the service in time");
+        }
+        // macOS refuses a new timeout (EINVAL) once the service has closed its end, with
+        // the reply still buffered. A closed peer cannot make the read block, so read on.
+        if let Err(error) = stream.set_read_timeout(Some(left))
+            && error.kind() != std::io::ErrorKind::InvalidInput
+        {
+            return Err(error.into());
+        }
+        let n = stream.read(&mut chunk)?;
+        if n == 0 {
+            break;
+        }
+        response.extend_from_slice(&chunk[..n]);
+    }
+    let result: Value = serde_json::from_slice(&response)?;
     if let Some(error) = result["error"].as_str() {
         bail!("{}", crate::safe(error));
     }
@@ -49,7 +72,31 @@ pub fn request(root: &Path, value: &Value) -> Result<Value> {
 const INVENTORY_RESEND: f64 = 900.;
 /// Sync body fields beyond the original envelope. Each is sent only after the server
 /// advertised it in sync_extensions, so an older server keeps accepting the legacy body.
-const SYNC_EXTENSIONS: [&str; 2] = ["scanned_at", "fetch_results"];
+const SYNC_EXTENSIONS: [&str; 3] = ["scanned_at", "fetch_results", "hooked"];
+/// Providers every server accepts; others travel only once `hooked` is negotiated.
+const LEGACY_PROVIDERS: [&str; 2] = ["codex", "claude"];
+fn legacy_session(session: &Value) -> bool {
+    session["source"] != crate::hooks::SOURCE
+        && session["provider"]
+            .as_str()
+            .is_some_and(|p| LEGACY_PROVIDERS.contains(&p))
+}
+/// What an older server, one without the `hooked` extension, can validate: no hooked
+/// sessions in inventories and no hooked session objects on events.
+fn legacy_batch(batch: &mut [Value]) {
+    for event in batch.iter_mut() {
+        if let Some(sessions) = event["sessions"].as_array_mut() {
+            sessions.retain(legacy_session);
+        }
+        if event
+            .get("session")
+            .is_some_and(|s| s.is_object() && !legacy_session(s))
+            && let Some(object) = event.as_object_mut()
+        {
+            object.remove("session");
+        }
+    }
+}
 fn negotiated(state: &State) -> Result<Vec<String>> {
     Ok(
         serde_json::from_str(&state.get("sync_extensions")?.unwrap_or_default())
@@ -58,10 +105,12 @@ fn negotiated(state: &State) -> Result<Vec<String>> {
 }
 
 fn inventory(state: &State) -> Result<()> {
+    let hooked = negotiated(state)?.iter().any(|e| e == "hooked");
     let sessions: Vec<_> = state
         .sessions()?
         .into_iter()
         .filter(|s| s.live || now() - s.observed_at < 86400.)
+        .filter(|s| hooked || legacy_session(&json!(s)))
         .collect();
     let event = json!({"kind":"inventory","sessions":sessions});
     let encoded = serde_json::to_vec(&event)?;
@@ -176,9 +225,12 @@ fn sync_once(state: &State, config: &Path, server: &Url, client: &Client) -> Res
         inventory(state)?;
         tx.commit()?;
     }
-    let batch = state.batch()?;
+    let mut batch = state.batch()?;
     let extensions = negotiated(state)?;
     let uses = |name: &str| extensions.iter().any(|e| e == name);
+    if !uses("hooked") {
+        legacy_batch(&mut batch);
+    }
     // Fetch answers share the batch's 900 KB budget under the server's 1 MB body limit.
     let results = if uses("fetch_results") {
         state.fetch_results(900_000usize.saturating_sub(serde_json::to_vec(&batch)?.len()))?
@@ -282,7 +334,11 @@ fn sync_once(state: &State, config: &Path, server: &Url, client: &Client) -> Res
                 .execute("UPDATE commands SET status='reported' WHERE id=?", [id])?;
         }
     }
-    if state.policy()?.remote_control {
+    // Prompts for hooked sessions are claimed only when the session's hook asks for them.
+    let offered = data["commands"].as_array().cloned().unwrap_or_default();
+    let allowed = state.policy()?.remote_control;
+    crate::hooks::mark_pending(state, if allowed { &offered } else { &[] })?;
+    if allowed {
         for command in data["commands"].as_array().into_iter().flatten() {
             let Some(id) = command["id"].as_str().filter(|s| discovery::valid_id(s)) else {
                 continue;
@@ -301,6 +357,7 @@ fn sync_once(state: &State, config: &Path, server: &Url, client: &Client) -> Res
                 continue;
             };
             if !session.live
+                || session.source == crate::hooks::SOURCE
                 || (command["action"] == "prompt"
                     && command["timing"] != "steer"
                     && session.state != "idle")
@@ -337,6 +394,19 @@ fn local_control(state: &State, providers: &mut Providers, request: &Value) -> R
         .as_str()
         .context("Session ID is required")?;
     let session = state.session(id)?;
+    if session.source == crate::hooks::SOURCE {
+        if !session.live || command["action"] != "prompt" || command["timing"] == "steer" {
+            bail!("unsupported");
+        }
+        crate::hooks::leave_local(
+            state,
+            &session.id,
+            command["message"].as_str().unwrap_or(""),
+        )?;
+        return Ok(
+            json!({"status":"queued","note":"Guidance reaches this session at its next hook point (a tool call, the end of its turn, or the next prompt) and expires after an hour."}),
+        );
+    }
     let expected = command["expected_turn_id"]
         .as_str()
         .map(str::to_owned)
@@ -378,8 +448,33 @@ fn prepare_update(state: &State, client: &Client, exe: &Path) -> Result<Option<P
     }
 }
 
-fn handle(state: &State, providers: &mut Providers, value: Value) -> Result<Value> {
+fn handle(
+    state: &State,
+    providers: &mut Providers,
+    remote: &crate::hooks::Remote,
+    value: Value,
+) -> Result<Value> {
     match value["op"].as_str().unwrap_or("") {
+        // A hooked session's hook asks for its guidance, then reports how it went.
+        "claim" => crate::hooks::claim_now(
+            state,
+            remote,
+            value["session_id"]
+                .as_str()
+                .context("Session ID is required")?,
+            value["deadline"].as_f64(),
+        ),
+        "settle" => {
+            crate::hooks::settle(
+                state,
+                value["command_id"]
+                    .as_str()
+                    .filter(|c| discovery::valid_id(c))
+                    .context("Command ID is required")?,
+                value["outcome"].as_str().unwrap_or("uncertain"),
+            )?;
+            Ok(json!({}))
+        }
         "status" => Ok(
             json!({"running":true,"pid":std::process::id(),"version":env!("CARGO_PKG_VERSION"),"connection":state.get("connection")?,"last_sync":state.get("last_sync")?,"policy":state.policy()?}),
         ),
@@ -445,8 +540,9 @@ fn handle(state: &State, providers: &mut Providers, value: Value) -> Result<Valu
                     },
                 }
             };
+            // Only an executing command moves; a finished one is never overwritten.
             state.db.execute(
-                "UPDATE commands SET status=?,code=? WHERE id=?",
+                "UPDATE commands SET status=?,code=? WHERE id=? AND status='executing'",
                 params![status, code, id],
             )?;
             Ok(json!({"status":status,"code":code}))
@@ -502,6 +598,17 @@ pub fn run(root: PathBuf, config: PathBuf, server: Url) -> Result<()> {
     let staged: Arc<Mutex<Option<PathBuf>>> = Arc::default();
     let sync_staged = staged.clone();
     let sync_exe = exe.clone();
+    // Claims for hooks must answer within the hook's own short wait.
+    let remote = crate::hooks::Remote {
+        config: config.clone(),
+        server: server.clone(),
+        client: Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_millis(800))
+            .timeout(crate::hooks::CLAIM_TIMEOUT)
+            .user_agent(concat!("roundtable-cli/", env!("CARGO_PKG_VERSION")))
+            .build()?,
+    };
     let worker = std::thread::spawn(move || -> Result<()> {
         let state = State::open(sync_root)?;
         let client = client()?;
@@ -553,6 +660,7 @@ pub fn run(root: PathBuf, config: PathBuf, server: Url) -> Result<()> {
             let (count, ok) = discovery::scan(&state, &mut system)?;
             providers.inventory(&state)?;
             crate::t3::scan(&state, &system)?;
+            crate::hooks::reconcile(&state, &system)?;
             state.set("process_count", &count.to_string())?;
             state.set("scan_ok", if ok { "true" } else { "false" })?;
             // The server treats sessions as current only while this heartbeat is fresh.
@@ -576,13 +684,20 @@ pub fn run(root: PathBuf, config: PathBuf, server: Url) -> Result<()> {
         match listener.accept() {
             Ok((mut stream, _)) => {
                 let result = read_request(&mut stream)
-                    .and_then(|value| handle(&state, &mut providers, value));
+                    .and_then(|value| handle(&state, &mut providers, &remote, value));
                 let value = match result {
                     Ok(v) => v,
                     Err(e) => json!({"error":e.to_string()}),
                 };
-                let _ = serde_json::to_writer(&mut stream, &value);
-                let _ = stream.write_all(b"\n");
+                let written = serde_json::to_writer(&mut stream, &value)
+                    .map_err(std::io::Error::other)
+                    .and_then(|_| stream.write_all(b"\n"));
+                // A claimed command the hook never received was not delivered.
+                if written.is_err()
+                    && let Some(command) = value["command_id"].as_str()
+                {
+                    crate::hooks::settle(&state, command, "failed")?;
+                }
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 std::thread::sleep(Duration::from_millis(50))
@@ -1035,9 +1150,107 @@ mod tests {
         // The remembered attempt is cleared so the next loop stages at once.
         assert_eq!(state.get("update_attempt")?.as_deref(), Some(""));
         assert_eq!(
-            state.get("cli_release")?.as_deref(),
-            Some(r#"{"sha256":{},"version":"9.9.9"}"#)
+            serde_json::from_str::<Value>(&state.get("cli_release")?.unwrap())?,
+            json!({"sha256":{},"version":"9.9.9"})
         );
+        Ok(())
+    }
+
+    #[test]
+    fn hooked_sessions_travel_only_to_a_server_that_accepts_them() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let state = State::open(tmp.path().join("state"))?;
+        let mut legacy = Session::new("codex", "old", "/work", "transcript");
+        legacy.live = true;
+        state.save_session(&legacy)?;
+        let mut hooked = Session::new("cursor", "conv", "/work", crate::hooks::SOURCE);
+        hooked.live = true;
+        state.save_session(&hooked)?;
+        let mut hooked_claude = Session::new("claude", "abc", "/work", crate::hooks::SOURCE);
+        hooked_claude.live = true;
+        state.save_session(&hooked_claude)?;
+        inventory(&state)?;
+        let ids = |batch: &[Value]| -> Vec<String> {
+            batch[0]["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|s| s["id"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        assert_eq!(ids(&state.batch()?), ["codex:old"]);
+        // Events about hooked sessions lose the session object an old server cannot validate.
+        state.event(json!({"kind":"prompt","session_id":hooked.id,"session":hooked}))?;
+        let mut batch = state.batch()?;
+        legacy_batch(&mut batch);
+        assert!(batch[1].get("session").is_none());
+        assert_eq!(batch[1]["session_id"], hooked.id);
+        state.ack(2)?;
+        state.set("sync_extensions", r#"["scanned_at","hooked"]"#)?;
+        inventory(&state)?;
+        assert_eq!(
+            ids(&state.batch()?),
+            ["claude:abc", "codex:old", "cursor:conv"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_hooked_session_takes_terminal_guidance_through_the_claim_op() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let state = State::open(tmp.path().join("state"))?;
+        let mut session = Session::new("cursor", "conv", "/work", crate::hooks::SOURCE);
+        session.live = true;
+        session.state = "working".into();
+        session.capabilities = vec!["prompt".into()];
+        state.save_session(&session)?;
+        let mut providers = Providers::new();
+        let remote = crate::hooks::Remote {
+            config: tmp.path().join("config"),
+            server: Url::parse("https://roundtable.bot").unwrap(),
+            client: client()?,
+        };
+        let local = handle(
+            &state,
+            &mut providers,
+            &remote,
+            json!({"op":"prompt","action":"prompt","session_id":session.id,"message":"local","timing":"queue"}),
+        )?;
+        assert_eq!(local["status"], "queued");
+        // Steering and interrupts are not something a hook can do.
+        assert!(
+            handle(
+                &state,
+                &mut providers,
+                &remote,
+                json!({"op":"prompt","action":"prompt","session_id":session.id,"message":"x","timing":"steer"}),
+            )
+            .is_err()
+        );
+        let reply = handle(
+            &state,
+            &mut providers,
+            &remote,
+            json!({"op":"claim","session_id":session.id}),
+        )?;
+        assert!(reply["text"].as_str().unwrap().ends_with("\n> local"));
+        assert!(reply["command_id"].is_null());
+        // Nothing is left behind, and settling an unknown command is harmless.
+        assert!(
+            handle(
+                &state,
+                &mut providers,
+                &remote,
+                json!({"op":"claim","session_id":session.id})
+            )
+            .is_err()
+        );
+        handle(
+            &state,
+            &mut providers,
+            &remote,
+            json!({"op":"settle","command_id":"nothing","outcome":"delivered"}),
+        )?;
         Ok(())
     }
 

@@ -121,11 +121,11 @@ pub struct State {
 }
 
 impl State {
-    pub fn open(root: PathBuf) -> Result<Self> {
-        private_dir(&root)?;
+    fn connect(root: &Path, create: bool, busy: std::time::Duration) -> Result<Connection> {
+        private_dir(root)?;
         let path = root.join("state.sqlite");
         let file = OpenOptions::new()
-            .create(true)
+            .create(create)
             .truncate(false)
             .read(true)
             .write(true)
@@ -137,7 +137,18 @@ impl State {
             bail!("Unsafe state database permissions");
         }
         let db = Connection::open(path)?;
-        db.busy_timeout(std::time::Duration::from_secs(3))?;
+        db.busy_timeout(busy)?;
+        Ok(db)
+    }
+    /// A host hook's view: the existing database without schema setup, giving up fast
+    /// when the service holds it, so a hook never stalls the host's tool call.
+    pub fn open_existing(root: PathBuf) -> Result<Self> {
+        let db = Self::connect(&root, false, std::time::Duration::from_millis(250))?;
+        db.execute_batch("PRAGMA secure_delete=ON;")?;
+        Ok(Self { db, root })
+    }
+    pub fn open(root: PathBuf) -> Result<Self> {
+        let db = Self::connect(&root, true, std::time::Duration::from_secs(3))?;
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA journal_size_limit=33554432; PRAGMA secure_delete=ON;
             CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,data TEXT NOT NULL);
@@ -147,7 +158,8 @@ impl State {
             CREATE TABLE IF NOT EXISTS usage_items(session TEXT,item TEXT,data TEXT,PRIMARY KEY(session,item));
             CREATE TABLE IF NOT EXISTS provider_items(session TEXT,item TEXT,length INTEGER,hash TEXT,seen REAL,PRIMARY KEY(session,item));
             CREATE TABLE IF NOT EXISTS commands(id TEXT PRIMARY KEY,data TEXT NOT NULL,status TEXT NOT NULL,code TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS fetch_results(id TEXT PRIMARY KEY,data TEXT NOT NULL,at REAL NOT NULL);")?;
+            CREATE TABLE IF NOT EXISTS fetch_results(id TEXT PRIMARY KEY,data TEXT NOT NULL,at REAL NOT NULL);
+            DROP TABLE IF EXISTS mailbox;")?;
         let state = Self { db, root };
         if state.get("stream_id")?.is_none() {
             state.set("stream_id", &uuid::Uuid::new_v4().to_string())?;
@@ -496,6 +508,22 @@ mod tests {
         assert_eq!(state.batch()?[0]["seq"], 10002);
         Ok(())
     }
+    #[test]
+    fn an_earlier_builds_mailbox_table_is_dropped_on_upgrade() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let root = tmp.path().join("state");
+        let state = State::open(root.clone())?;
+        state.db.execute_batch("CREATE TABLE mailbox(id TEXT PRIMARY KEY,session TEXT NOT NULL,data TEXT NOT NULL,expires_at REAL NOT NULL); INSERT INTO mailbox VALUES ('m','s','{}',0);")?;
+        drop(state);
+        let state = State::open(root.clone())?;
+        assert!(state.db.prepare("SELECT 1 FROM mailbox").is_err());
+        drop(state);
+        // The hook's view opens the upgraded database without schema setup.
+        let hook = State::open_existing(root)?;
+        assert!(hook.sessions()?.is_empty());
+        Ok(())
+    }
+
     #[test]
     fn outbox_survives_restart_and_content_revocation() -> Result<()> {
         let tmp = tempfile::tempdir()?;

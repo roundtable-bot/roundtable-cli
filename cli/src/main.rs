@@ -1,6 +1,7 @@
 mod credentials;
 mod daemon;
 mod discovery;
+mod hooks;
 mod init;
 mod providers;
 mod service;
@@ -69,6 +70,26 @@ enum Commands {
         /// Allow remote control, still requiring an explicit website assistant grant
         #[arg(long)]
         allow_control: bool,
+        /// Skip installing Roundtable hooks into the coding-agent hosts on this computer
+        #[arg(long)]
+        no_hooks: bool,
+    },
+    /// Install, remove, or report Roundtable hooks in the coding-agent hosts on this computer
+    Hooks {
+        #[arg(value_parser=["install","remove","status"])]
+        action: String,
+    },
+    /// Entry point the host hooks invoke; records the session and prints pending guidance
+    #[command(hide = true)]
+    Hook {
+        host: String,
+        event: String,
+        #[arg(long)]
+        session: Option<String>,
+        #[arg(long)]
+        state: Option<String>,
+        #[arg(long)]
+        command: Option<String>,
     },
     /// Configure content collection and remote control locally
     Monitor {
@@ -545,6 +566,27 @@ fn run() -> Result<()> {
         .config_dir
         .or_else(|| directories::BaseDirs::new().map(|d| d.config_dir().join("roundtable")))
         .context("Cannot find a config directory; supply --config-dir")?;
+    // A host hook must never fail or print anything but guidance.
+    if let Commands::Hook {
+        host,
+        event,
+        session,
+        state,
+        command,
+    } = &cli.command
+    {
+        hooks::run(
+            root,
+            cli.server.clone(),
+            hooks::HookArgs {
+                host: host.clone(),
+                event: event.clone(),
+                session: session.clone(),
+                state: state.clone(),
+                command: command.clone(),
+            },
+        );
+    }
     state::private_dir(&root)?;
     let agent_root = state::agent_root(&root, cli.server.as_str());
     let client = Client::builder()
@@ -561,11 +603,17 @@ fn run() -> Result<()> {
         Commands::Receipts { command } => return receipt_command(&agent_root, command),
         Commands::Daemon => return daemon::run(agent_root, root, cli.server),
         Commands::Service { action } => {
-            return service::manage(&action, &agent_root, &root, &cli.server);
+            service::manage(&action, &agent_root, &root, &cli.server)?;
+            if action == "uninstall" {
+                // Hooks must not keep calling a service that is gone.
+                hooks::manage("remove", &root, &cli.server)?;
+            }
+            return Ok(());
         }
         Commands::Setup {
             content,
             allow_control,
+            no_hooks,
         } => {
             configure(
                 &state::State::open(agent_root.clone())?,
@@ -576,8 +624,13 @@ fn run() -> Result<()> {
                 None,
             )?;
             service::manage("install", &agent_root, &root, &cli.server)?;
-            return service::manage("start", &agent_root, &root, &cli.server);
+            service::manage("start", &agent_root, &root, &cli.server)?;
+            if no_hooks {
+                return Ok(());
+            }
+            return hooks::manage("install", &root, &cli.server);
         }
+        Commands::Hooks { action } => return hooks::manage(&action, &root, &cli.server),
         Commands::Monitor {
             content,
             metadata_only,
@@ -597,7 +650,7 @@ fn run() -> Result<()> {
         Commands::Sessions { command } => return session_command(&agent_root, command),
         _ => {}
     }
-    let store = Store::open(root, cli.server.as_str())?;
+    let store = Store::open(root.clone(), cli.server.as_str())?;
     match cli.command {
         Commands::Login {
             name,
@@ -660,7 +713,7 @@ fn run() -> Result<()> {
             }
             store.remove(&credential)?;
             println!("Logged out. Machine access revoked.");
-            Ok(())
+            hooks::manage("remove", &root, &cli.server)
         }
         _ => unreachable!("Service commands are handled before opening credentials"),
     }

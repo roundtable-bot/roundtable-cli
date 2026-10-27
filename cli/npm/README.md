@@ -6,7 +6,7 @@ Install the npm tarball from the public GitHub release. No npm registry account 
 binary; it does not build Rust or start background services. Node 20+ is required for npm.
 
 ```sh
-roundtable_package="https://github.com/roundtable-bot/roundtable-cli/releases/download/v0.2.19/roundtable-cli-0.2.19.tgz"
+roundtable_package="https://github.com/roundtable-bot/roundtable-cli/releases/download/v0.2.20/roundtable-cli-0.2.20.tgz"
 npm install -g --allow-remote=root --allow-scripts="$roundtable_package" "$roundtable_package"
 roundtable login
 roundtable setup
@@ -35,7 +35,8 @@ templates produce a runtime error explaining how to rebuild with the complete
 template. Test fixtures under `cli/tests/fixtures/` are never shipped as templates.
 
 Installation alone does not read or upload conversations. `setup` enables metadata monitoring
-at user login. Enable visible prompt/response collection for selected projects and remote control:
+at user login and installs Roundtable hooks into the coding agents found on the machine
+(`--no-hooks` skips that). Enable visible prompt/response collection for selected projects and remote control:
 
 ```sh
 roundtable monitor --content /absolute/project/path --allow-control
@@ -76,7 +77,43 @@ and running work with no direct provider activity evidence is `unknown`, with a 
 status note. Both appear in Active Sessions. It expires when T3 closes, the run ends,
 or the thread is archived/deleted. It never resumes, interrupts, or writes to T3.
 Local prompts require an idle session. Remote queued guidance waits for the next idle turn and
-expires after 60 seconds. After an uncertain delivery, inspect the provider before resolving
+expires after 60 seconds.
+
+Sessions started in a terminal become promptable through hooks in the agent's own configuration:
+
+```sh
+roundtable hooks install   # also run by roundtable setup
+roundtable hooks status
+roundtable hooks remove
+```
+
+Supported hosts: Claude Code, Codex, Cursor, Gemini CLI, Copilot CLI, Grok CLI and opencode; only
+installed ones are touched, every edited file is backed up under `hook-backups` in the config
+folder, and other hooks in those files are kept. A hooked session (`source: hooked`) appears with
+live busy/idle state and the `prompt` capability. A website prompt for such a session stays
+pending on the server; the service only notes that one is waiting. At the session's next hook
+point (a tool call, the end of its turn, or the next prompt) the hook asks the service, which
+claims the command from the server right then, under the server's own checks (credential, grants,
+lease, delegation, expiry), and the hook prints it under a heading naming the person or assistant
+who sent it, with every message line quoted (`> `) so the body cannot forge the heading; control
+and Unicode format characters are stripped, tabs and joiners kept. No local copy of the
+authorization exists: a revoked grant means the claim is refused and the command expires on the
+server. The receipt says `delivered` once the text was handed to the host: for the hosts that
+read the hook's stdout, when it was written and flushed (well inside their 10-second hook limit);
+for opencode, when the plugin appended it to the tool result or its prompt was accepted (a
+refused prompt reports `failed`, anything ambiguous `uncertain`). A claim the hook never settled
+is reported `uncertain`, never redelivered. A hook tells the service when it stops waiting, and
+the service starts no server claim it could not finish by then, so a busy service leaves the
+command pending rather than consuming it; a command the server refuses is not asked for again
+while the server keeps offering it. Terminal guidance is printed even when a server claim fails. Guidance from `roundtable
+sessions prompt` waits locally for 60 seconds with no receipt. Idle sessions are not woken; steer
+and interrupt are not available. Hooked sessions and the new providers are reported only to a
+server that advertises `hooked`; an older server never sees them, so a rollback does not stop
+sync. `roundtable service uninstall` and `roundtable logout` remove the hooks; a hook whose binary
+is gone exits without doing anything. Locally queued delivery was verified on Claude Code, Codex
+(which asks once to trust the hooks) and opencode; the server path is covered by server tests
+only. Cursor, Gemini CLI, Copilot CLI and Grok CLI are configured per their documentation but
+unverified. After an uncertain delivery, inspect the provider before resolving
 the command as `delivered` or `not-delivered`; resolution never sends the prompt again.
 
 ```sh

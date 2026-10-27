@@ -15,6 +15,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 /// Bound subprocess time/output, capture rather than logging provider errors or credentials.
+#[cfg(target_os = "macos")]
 pub fn bounded_output(command: &mut Command, seconds: u64) -> Result<Vec<u8>> {
     let mut child = command
         .stdin(Stdio::null())
@@ -740,7 +741,7 @@ fn record_external_item(state: &State, session: &Session, item: &Value) -> Resul
     Ok(())
 }
 
-fn visible_event(
+pub fn visible_event(
     state: &State,
     session: &Session,
     kind: &str,
