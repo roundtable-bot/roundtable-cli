@@ -114,16 +114,22 @@ capabilities individually; ordinary existing Claude terminals remain observation
 
 ## Publish a release
 
-Update the version in `package.json`, `cli/npm/package.json` (including the optional
-native package versions), `cli/Cargo.toml`, and `cli/Cargo.lock`. Update the install
-commands in both READMEs and the website guide. Open a pull request and merge it
-after the four native build/test jobs pass.
+CLI source releases are managed by the `CLI release` workflow in the Roundtable
+repository after its production checks pass. That workflow chooses the version,
+syncs `cli/` and `templates/` into this mirror, and pushes the version tag. Make
+source changes in Roundtable; do not manually bump patch versions in this mirror.
 
-Tag that commit on `main` with `vVERSION` and push the tag. The release workflow
-rejects a tag that differs from the npm or Rust package version. After all four
-native targets pass, it publishes the npm tarball, native binaries, and
-`SHA256SUMS` to GitHub Releases using the repository's built-in token. No npm
-registry token is needed; users install the tarball URL shown above.
+The release workflow rejects a tag that differs from the npm or Rust package
+version. After all four native targets pass, it publishes the npm tarball, native
+binaries, and `SHA256SUMS` to GitHub Releases using the repository's built-in token.
+No npm registry token is needed; users install the tarball URL shown above.
+
+If an existing tag has no release because its build failed, fix the workflow on
+`main`, then run **Native builds and release** from `main` with `release_tag` set to
+that tag. All four platforms build the tagged source using the corrected workflow;
+publication uses the same tag and checks its package version. Leave `release_tag`
+empty for a build without publication. After recovery, rerun Roundtable's `CLI
+release` workflow to update its automatic-update pointer and install instructions.
 
 Keep published tags and release assets unchanged. Ship a new version for fixes.
 The former `DevStrategist` repository URLs redirect here, so existing v0.2.8
