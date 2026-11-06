@@ -121,6 +121,10 @@ enum Commands {
         /// Store the credential in a private plaintext file instead of the OS keychain
         #[arg(long)]
         insecure_storage: bool,
+        /// Redeem a server-issued, pre-approved enrollment code from ROUNDTABLE_ENROLLMENT_CODE
+        /// (Roundtable cloud computers) instead of approving in a browser
+        #[arg(long, hide = true)]
+        enrollment: bool,
     },
     /// Check this machine's login with the server
     Status {
@@ -414,6 +418,7 @@ fn login(
     name: Option<String>,
     no_browser: bool,
     file_storage: bool,
+    enrollment: Option<String>,
 ) -> Result<()> {
     if let Some((credential, token)) = store.load()? {
         let existing = client
@@ -448,34 +453,14 @@ fn login(
     } else {
         "linux"
     };
-    let code: DeviceCode = serde_json::from_value(response(
-        client
-            .post(endpoint(server, "/auth/device/code"))
-            .json(&json!({"name": name, "platform": platform}))
-            .send()?,
-    )?)?;
-    // The server cannot redirect a user or credential to a different origin.
-    if code.verification_uri_complete.origin() != server.origin()
-        || code.verification_uri_complete.path() != "/cli/authorize"
-        || !code.verification_uri_complete.username().is_empty()
-        || code.verification_uri_complete.password().is_some()
-        || code.expires_in > 600
-        || code.expires_in == 0
-        || code.interval == 0
-        || code.interval > 60
-    {
-        bail!("Server returned an invalid device authorization URL or expiry");
-    }
-    println!(
-        "Your code: {}\nOpen {}\nApprove this code in the browser. Waiting for login…",
-        safe(&code.user_code),
-        code.verification_uri_complete
-    );
-    if !no_browser && open_browser(&code.verification_uri_complete).is_err() {
-        eprintln!("Could not open a browser. Open the URL above on any device.");
-    }
-    let deadline = Instant::now() + Duration::from_secs(code.expires_in);
-    let mut interval = code.interval.max(5);
+    // A cloud computer's code was approved by the server for its owner when the VM was
+    // created; it is single-use and short-lived, so there is nothing to show or open.
+    let (device_code, expires_in, interval) = match enrollment {
+        Some(code) => (code, 600, 5),
+        None => browser_code(client, server, &name, platform, no_browser)?,
+    };
+    let deadline = Instant::now() + Duration::from_secs(expires_in);
+    let mut interval = interval.max(5);
     loop {
         if Instant::now() + Duration::from_secs(interval) >= deadline {
             bail!("Login expired. Run roundtable login again.");
@@ -483,7 +468,7 @@ fn login(
         std::thread::sleep(Duration::from_secs(interval));
         let poll = match client
             .post(endpoint(server, "/auth/device/token"))
-            .json(&json!({"device_code": code.device_code}))
+            .json(&json!({"device_code": device_code}))
             .send()
         {
             Ok(response) => response,
@@ -549,6 +534,43 @@ fn login(
             ),
         }
     }
+}
+
+/// Starts a browser-approved login and returns its device code, lifetime and poll interval.
+fn browser_code(
+    client: &Client,
+    server: &Url,
+    name: &str,
+    platform: &str,
+    no_browser: bool,
+) -> Result<(String, u64, u64)> {
+    let code: DeviceCode = serde_json::from_value(response(
+        client
+            .post(endpoint(server, "/auth/device/code"))
+            .json(&json!({"name": name, "platform": platform}))
+            .send()?,
+    )?)?;
+    // The server cannot redirect a user or credential to a different origin.
+    if code.verification_uri_complete.origin() != server.origin()
+        || code.verification_uri_complete.path() != "/cli/authorize"
+        || !code.verification_uri_complete.username().is_empty()
+        || code.verification_uri_complete.password().is_some()
+        || code.expires_in > 600
+        || code.expires_in == 0
+        || code.interval == 0
+        || code.interval > 60
+    {
+        bail!("Server returned an invalid device authorization URL or expiry");
+    }
+    println!(
+        "Your code: {}\nOpen {}\nApprove this code in the browser. Waiting for login…",
+        safe(&code.user_code),
+        code.verification_uri_complete
+    );
+    if !no_browser && open_browser(&code.verification_uri_complete).is_err() {
+        eprintln!("Could not open a browser. Open the URL above on any device.");
+    }
+    Ok((code.device_code, code.expires_in, code.interval))
 }
 
 fn run() -> Result<()> {
@@ -656,6 +678,7 @@ fn run() -> Result<()> {
             name,
             no_browser,
             insecure_storage,
+            enrollment,
         } => login(
             &client,
             &cli.server,
@@ -663,6 +686,16 @@ fn run() -> Result<()> {
             name,
             no_browser,
             insecure_storage,
+            if enrollment {
+                Some(
+                    std::env::var("ROUNDTABLE_ENROLLMENT_CODE")
+                        .ok()
+                        .filter(|c| !c.is_empty())
+                        .context("ROUNDTABLE_ENROLLMENT_CODE is required with --enrollment")?,
+                )
+            } else {
+                None
+            },
         ),
         Commands::Status { json: as_json } => {
             let (_, token) = store
